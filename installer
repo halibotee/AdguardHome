@@ -275,17 +275,16 @@ check_version() {
 					fi
 				fi
 				[ -n "${LINSTALL}" ] && [ -n "${RMNSTALL}" ] && [ -n "${MD5SUM_L}" ] && [ -n "${MD5SUM_R}" ] && break
-				varcnt=$((varcnt+1)); [ ${varcnt} -ge 2 ] && { rm -f "${REMOTE_INSTALLER}" "${REMOTE_INSTALLER_MD5}"; PTXT "One or more critical variables could not be set in a timely manner."; sleep 3s; exit 1; }
+				varcnt=$((varcnt+1)); [ ${varcnt} -ge 2 ] && { rm -f "${REMOTE_INSTALLER}" "${REMOTE_INSTALLER_MD5}"; PTXT "Warning: Could not check for installer updates."; break; }
 			done
 			rm -f "${REMOTE_INSTALLER}" "${REMOTE_INSTALLER_MD5}"
 			ADGUARD_BRANCH="$(conf_value ADGUARD_BRANCH)"; ADGUARD_VER="$("${AGH_FILE}" --version | cut -d" " -f4-)"
-			[ -z "${LINSTALL}" ] && exit 1; [ -z "${RMNSTALL}" ] && exit 1; [ -z "${ADGUARD_VER}" ] && exit 1
-			REMOTE_ADGUARD_VER="$(adguard_remote_version "${ADGUARD_BRANCH}")"; [ -z "${REMOTE_ADGUARD_VER}" ] && exit 1
-			[ "${RMNSTALL}" != "${LINSTALL}" ] && PTXT "New AI_VERSION=v${RMNSTALL} Available. Run option 1 to upgrade." && AUTO_UPDATE="update"
-			[ "${RMNSTALL}" = "${LINSTALL}" ] && [ "${MD5SUM_R}" != "${MD5SUM_L}" ] && PTXT "AI_VERSION=v${LINSTALL}, minor update available." && AUTO_UPDATE="update"
-			[ "${REMOTE_ADGUARD_VER}" != "${ADGUARD_VER}" ] && PTXT "New ${ADGUARD_BRANCH:-release} ADGUARDHOME_VER=${REMOTE_ADGUARD_VER} Available." && AUTO_UPDATE="update"
+			REMOTE_ADGUARD_VER="$(adguard_remote_version "${ADGUARD_BRANCH}")"
+			[ -n "${RMNSTALL}" ] && [ -n "${LINSTALL}" ] && [ "${RMNSTALL}" != "${LINSTALL}" ] && PTXT "New AI_VERSION=v${RMNSTALL} Available. Run option 1 to upgrade." && AUTO_UPDATE="update"
+			[ -n "${RMNSTALL}" ] && [ -n "${LINSTALL}" ] && [ -n "${MD5SUM_R}" ] && [ -n "${MD5SUM_L}" ] && [ "${RMNSTALL}" = "${LINSTALL}" ] && [ "${MD5SUM_R}" != "${MD5SUM_L}" ] && PTXT "AI_VERSION=v${LINSTALL}, minor update available." && AUTO_UPDATE="update"
+			[ -n "${REMOTE_ADGUARD_VER}" ] && [ -n "${ADGUARD_VER}" ] && [ "${REMOTE_ADGUARD_VER}" != "${ADGUARD_VER}" ] && PTXT "New ${ADGUARD_BRANCH:-release} ADGUARDHOME_VER=${REMOTE_ADGUARD_VER} Available." && AUTO_UPDATE="update"
 		elif [ -z "${LINSTALL}" ] && [ -z "${RMNSTALL}" ] && [ -z "$1" ]; then
-			check_connection 300 && check_version x || PTXT "${ERROR}Timed out waiting for Internet."
+			check_connection 5 && check_version x
 		else check_version x x; fi
 	fi
 }
