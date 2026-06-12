@@ -102,7 +102,7 @@ download_file() {
 		MD5SUM_OLD=""; MD5SUM_CURR=""; MD5SUM_EXPECTED=""; COUNT=0
 		[ -f "${TARG}/${FILENAME}" ] && MD5SUM_OLD="$(md5sum "${TARG}/${FILENAME}" | awk '{print $1;exit}')"
 		while [ ${COUNT} -lt 3 ]; do
-			PTXT "${INFO} Downloading ${FILENAME}"; rm -f "${TMP_FILE}" "${TMP_MD5}"
+			PTXT "Downloading ${FILENAME}"; rm -f "${TMP_FILE}" "${TMP_MD5}"
 			if http_get_file "${URL}" "${TMP_FILE}" "" insecure && [ -s "${TMP_FILE}" ]; then
 				MD5SUM_CURR="$(md5sum "${TMP_FILE}" | awk '{print $1;exit}')"
 				MD5SUM_EXPECTED=""
@@ -453,7 +453,7 @@ check_version() {
 choose_branch() {
 	[ "$1" = "1" ] && { ADGUARD_BRANCH_OLD="$(conf_value ADGUARD_BRANCH)"; export ADGUARD_BRANCH_OLD; del_conf ADGUARD_BRANCH; }
 	if [ ! -f "${CONF_FILE}" ] || [ -z "$(conf_value ADGUARD_BRANCH)" ]; then
-		PTXT "${INFO} Choose AdGuardHome build:" "  1) Release" "  2) Beta" "  3) Edge"
+		PTXT "Choose AdGuardHome build:" "  1) Release" "  2) Beta" "  3) Edge"
 		read_input_num "Select mode" 1 3
 		local BUILD; case ${CHOSEN} in 1) BUILD=release;; 2) BUILD=beta;; 3) BUILD=edge;; esac
 		write_conf ADGUARD_BRANCH "\"${BUILD}\""
@@ -788,7 +788,7 @@ menu() {
 		read_input_num "Selection" 1 2 q;; *) CHOSEN="$1";; esac
 	[ -n "${CHOSEN}" ] && trap 'clear; end_op_message 2' HUP INT QUIT ABRT TERM
 	case "${CHOSEN}" in
-		1|install|update) PTXT "${INFO} Installing AdGuardHome..."; read_yesno "Proceed?" && inst_AdGuardHome "install" || end_op_message 1;;
+		1|install|update) PTXT "Installing AdGuardHome..."; inst_AdGuardHome "install";;
 		2|uninstall) read_yesno "Uninstall AdGuardHome?" && uninst_all || end_op_message 1;;
 		3|changepw) read_yesno "Change password?" && AdGuardHome_authen 0 || end_op_message 1;;
 		4|reconfigure) read_yesno "Reconfigure?" && setup_AdGuardHome reconfig || end_op_message 1;;
