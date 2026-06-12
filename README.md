@@ -10,7 +10,7 @@
 
 ### 一行命令（交互菜单 → 选安装模式）
 ```sh
-curl -fsSL -o /tmp/agh-installer https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh /tmp/agh-installer master; rm -f /tmp/agh-installer
+curl -fsSL -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer master; rm -f installer
 ```
 
 进入菜单选 `1` 后，选择：
@@ -19,7 +19,7 @@ curl -fsSL -o /tmp/agh-installer https://raw.githubusercontent.com/halibotee/Adg
 
 ### 一键自动（跳过菜单）
 ```sh
-curl -fsSL -o /tmp/agh-installer https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh /tmp/agh-installer master auto-install; rm -f /tmp/agh-installer
+curl -fsSL -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer master auto-install; rm -f installer
 ```
 
 WebUI 默认 `http://192.168.50.1:14711/`（用户名 `admin`，密码安装时打印）。
