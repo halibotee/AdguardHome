@@ -4,21 +4,23 @@
 
 基于 [jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer](https://github.com/jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer)（MIT 协议）修改优化。
 
-## 一行命令
+## 一键安装
 
 ```sh
 curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer; rm installer
 ```
 
-菜单选 `1) Install/Update`，按提示交互配置。
+按提示交互配置。
+
+## 一键卸载
+
+```sh
+curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer 2; rm installer
+```
+
+按提示确认卸载。
 
 ## 前置条件
 
 - Asuswrt-Merlin 固件，JFFS 已启用
 - Entware 已安装到 `/opt`
-
-## 卸载
-
-```sh
-curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer 2; rm installer
-```
