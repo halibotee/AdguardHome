@@ -372,14 +372,6 @@ dnsmasq_params() {
 	if { ! resolv_conf_uses_rom && resolv_conf_is_tmp_mount; }; then {
 		umount /tmp/resolv.conf 2>/dev/null
 	}; fi
-	case "$(pidof "${PROCS}" 2>/dev/null | wc -w)" in
-		0)
-			return 0
-			;;
-		*)
-			:
-			;;
-	esac
 	RC_SUPPORT="$(nvram get rc_support 2>/dev/null)"
 	LAN_IF="$(nvram get lan_ifname 2>/dev/null)"
 	case "${1:-}" in
@@ -831,6 +823,7 @@ start_monitor() {
 					"")
 						MONITOR_ELAPSED="0"
 						{ adguardhome_run start_adguardhome; }
+						service restart_dnsmasq >/dev/null 2>&1
 						;;
 				esac
 				case "$(pidof "${PROCS}" 2>/dev/null | wc -w)" in
