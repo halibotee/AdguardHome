@@ -578,13 +578,12 @@ menu() {
 
 # ===== INPUT HELPERS =====
 read_input_num() {
-	local RANGE; for a in "$@"; do [ -z "$RANGE" ] && RANGE="[$2-$3]" || RANGE="${RANGE}/$a"; done
-	[ $# -le 3 ] && RANGE="[${2}-${3}]"
+	local RANGE="[${2}-${3}${4:+/$4}${5:+/$5}${6:+/$6}]"
 	PTXT -n "${INPUT}${1}, ${BOLD}${RANGE}${NORM}: "; read -r CHOSEN
-	[ -z "${CHOSEN}" ] && { PTXT "${ERROR}Invalid input."; read_input_num "$@"; return; }
+	[ -z "${CHOSEN}" ] && { read_input_num "$@"; return; }
 	case "${CHOSEN}" in $4|$5|$6) return 1;; esac
-	PTXT "${CHOSEN}" | grep -qE '^[0-9]+$' || { PTXT "${ERROR}Numbers only."; read_input_num "$@"; return; }
-	[ ${CHOSEN} -lt $2 ] || [ ${CHOSEN} -gt $3 ] && { PTXT "${ERROR}Not in range."; read_input_num "$@"; }
+	PTXT "${CHOSEN}" | grep -qE '^[0-9]+$' || { read_input_num "$@"; return; }
+	[ ${CHOSEN} -lt $2 ] || [ ${CHOSEN} -gt $3 ] && { read_input_num "$@"; return; }
 }
 
 read_input_port() {
@@ -621,7 +620,7 @@ NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]
 
 [ -n "${NAT_ENV}" ] && [ -z "$2" ] && PTXT "${WARNING}Double-NAT detected."
 
-[ -z "$2" ] && { printf '\e[8;50;125t'; printf '\033[?7l'; clear; sed -n '2,4p' "$0"; printf '\033[?7h'; }
+[ -z "$2" ] && { printf '\e[8;50;125t'; clear; sed -n '2,4p' "$0"; }
 
 case "${ROUTER_OS}" in Linux) [ -z "$2" ] && PTXT "Linux platform."; ROUTER_OS="linux";; *) PTXT "${ERROR}Unsupported OS."; exit 1;; esac
 case "$(/bin/uname -m)" in
