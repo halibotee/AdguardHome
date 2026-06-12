@@ -691,8 +691,8 @@ set_timezone() {
 auto_setup_AdGuardHome() {
 	local SCHEMA_VER="$("${AGH_FILE}" -v --version 2>/dev/null | awk '/Schema[[:space:]]version:/{print $NF}')"
 	[ -z "${SCHEMA_VER}" ] && SCHEMA_VER="27"
-	local WEB_PORT="${AUTO_WEBUI_PORT:-14711}" USERNAME="${AUTO_USERNAME:-admin}"
-	local UPSTREAM1="${AUTO_UPSTREAM1:-9.9.9.9}" UPSTREAM2="${AUTO_UPSTREAM2:-8.8.8.8}"
+	local WEB_PORT="${AUTO_WEBUI_PORT:-3000}" USERNAME="${AUTO_USERNAME:-admin}"
+	local UPSTREAM1="${AUTO_UPSTREAM1:-1.1.1.1}" UPSTREAM2="${AUTO_UPSTREAM2:-8.8.8.8}"
 	local PASS HASH LAN_IF NET_ADDR DOMAIN
 	
 	write_conf ADGUARD_WEBUI_PORT "\"${WEB_PORT}\""
