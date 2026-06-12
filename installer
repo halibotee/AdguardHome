@@ -559,10 +559,14 @@ menu() {
 	trap - HUP INT QUIT ABRT TERM
 	case "$1" in "")
 		PTXT "Choose option:" "  1) Install/Update" "  2) Uninstall"
-		{ [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ]; } && PTXT "  3) Change Password" "  4) Reconfigure" "  5) AMTM updates" "  b) Backup"
-		[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && PTXT "  r) Restore"
+		local max=2 args=""
+		if [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ]; then
+			PTXT "  3) Change Password" "  4) Reconfigure" "  5) AMTM updates" "  b) Backup"
+			max=5; args="q b"
+			[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && args="${args} r"
+		else args="q"; fi
 		PTXT "  q) Quit"
-		read_input_num "Selection" 1 2 q;; *) CHOSEN="$1";; esac
+		read_input_num "Selection" 1 ${max} ${args};; *) CHOSEN="$1";; esac
 	[ -n "${CHOSEN}" ] && trap 'clear; end_op_message 2' HUP INT QUIT ABRT TERM
 	case "${CHOSEN}" in
 		1|install|update) PTXT "Installing AdGuardHome..."; inst_AdGuardHome "install";;
