@@ -10,16 +10,6 @@
 curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer; rm installer
 ```
 
-按提示交互配置。
-
-## 一键卸载
-
-```sh
-curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer 2; rm installer
-```
-
-按提示确认卸载。
-
 ## 前置条件
 
 - Asuswrt-Merlin 固件，JFFS 已启用
