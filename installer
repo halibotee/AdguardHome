@@ -160,7 +160,6 @@ init_remote_adguard_metadata() {
 }
 
 init_upstream_adguard_metadata() {
-	[ ${OFFLINE:-0} -eq 1 ] && return 0
 	init_adguard_metadata_defaults
 	local rvm="${ADGUARD_METADATA_FILE}.r" bvm="${ADGUARD_METADATA_FILE}.b" evm="${ADGUARD_METADATA_FILE}.e" c=0
 	while [ ${c} -lt 3 ]; do
