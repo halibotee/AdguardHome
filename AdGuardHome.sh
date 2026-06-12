@@ -930,3 +930,19 @@ timezone() {
 
 [ -z "${SCRIPT_LOC}" ] && SCRIPT_LOC="$(readlink -f "$0")"
 have_cmd "${ADGUARDHOME_BINARY}" || ADGUARDHOME_BINARY="$(which AdGuardHome 2>/dev/null || echo "/opt/sbin/AdGuardHome")"
+
+PROCS="${PROCS:-AdGuardHome}"
+WORK_DIR="${WORK_DIR:-/opt/etc/AdGuardHome}"
+
+case "$(basename "$0" 2>/dev/null)" in
+	AdGuardHome.sh)
+		case "$1" in
+			init-start) start_monitor ;;
+			services-stop) stop_adguardhome ;;
+			dnsmasq) dnsmasq_params ;;
+			dnsmasq-sdn) dnsmasq_params "$2" ;;
+			firewall) : ;;
+			start|stop|restart|kill|reload) /opt/etc/init.d/S99AdGuardHome "$1" ;;
+		esac
+		;;
+esac
