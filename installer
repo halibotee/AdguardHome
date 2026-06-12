@@ -253,7 +253,7 @@ agh_restart() {
 	sleep 1s; agh_check; agh_is_running
 }
 
-agh_check() { /opt/etc/init.d/S99AdGuardHome check; }
+agh_check() { [ -x "/opt/etc/init.d/S99AdGuardHome" ] && /opt/etc/init.d/S99AdGuardHome check; }
 agh_wait_started() { local e=0; while ! agh_is_running; do [ ${e} -ge "${1:-60}" ] && return 1; sleep 1s; e=$((e+1)); done; return 0; }
 agh_wait_stopped() { local e=0; while [ "$(agh_process_count)" -ge 1 ]; do [ ${e} -ge "${1:-60}" ] && return 1; sleep 1s; e=$((e+1)); done; return 0; }
 agh_prepare_binary_replace() {
