@@ -621,53 +621,61 @@ inst_AdGuardHome() {
 }
 
 set_timezone() {
-	local TMP="/root" TZ_ARCH="$(uname -m)"
-	case "${TZ_ARCH}" in aarch64|arm64) TZ_ARCH="aarch64";; armv7l) TZ_ARCH="arm";; esac
-	local TZ_DATA="tzdata-2021e-1-${TZ_ARCH}.pkg.tar.bz2"
-	if [ ${OFFLINE_MODE} -eq 1 ]; then
-		if [ -f "${OFFLINE_DIR}/${TZ_DATA}" ]; then
-			PTXT "${INFO} Using local tzdata."
-			cp -f "${OFFLINE_DIR}/${TZ_DATA}" "${TMP}/${TZ_DATA}" 2>/dev/null || true
+	local TZ_SRC="" TMP="/root" TZ_ARCH="$(uname -m)"
+	case "${TZ_ARCH}" in aarch64|arm64) TZ_ARCH="aarch64" ;; armv7l) TZ_ARCH="arm" ;; esac
+	local TZ_DATA="tzdata-2021e-1-${TZ_ARCH}.pkg.tar.bz2" TZ_DATA_PATH=""
+
+	# ---- Auto-detect local timezone ----
+	if [ -f /etc/localtime ]; then
+		local LINK; LINK="$(readlink /etc/localtime 2>/dev/null || true)"
+		if [ -n "${LINK}" ]; then
+			TZ_SRC="$(echo "${LINK}" | sed 's|.*/zoneinfo/||; s|/posix/|/|')"
 		else
-			PTXT "${WARNING} Offline: No tzdata. You can set timezone later."
-			return 0
+			cp -f /etc/localtime "${ADDON_DIR}/localtime" 2>/dev/null && { PTXT "${INFO} Timezone: copied /etc/localtime"; return 0; }
 		fi
-	else opkg install column >/dev/null 2>&1; download_file "${TMP}" 644 "${RURL}/${TZ_DATA}"; fi
-	if [ ! -f "${TMP}/${TZ_DATA}" ]; then PTXT "${INFO} Skipping timezone setup."; return 0; fi
-	local INDEX; INDEX="$(tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ && /\/posix\//' | wc -l)"
-	[ ${INDEX} -eq 0 ] && { PTXT "${WARNING} No timezone data in archive."; return 0; }
-	if [ ${OFFLINE_MODE} -eq 1 ]; then
-		PTXT "${INFO} Setting default timezone Europe/Moscow (UTC+3, change via WebUI)."
-		mkdir -p "${TMP}/tzextract" 2>/dev/null
-		# Europe/Moscow is a hardlink to W-SU in tzdata; BusyBox tar can't extract single hardlinks.
-		# Extract W-SU (the actual inode) and copy it as Europe/Moscow localtime.
-		local TZ_EXTRACT_OK=0
-		for TZ_PATH in "usr/share/zoneinfo/posix/Europe/Moscow" "usr/share/zoneinfo/Europe/Moscow" "usr/share/zoneinfo/posix/W-SU" "usr/share/zoneinfo/W-SU"; do
-			local TZ_DIR="$(dirname "${TZ_PATH}")"
-			local TZ_NAME="$(basename "${TZ_PATH}")"
-			if tar xjf "${TMP}/${TZ_DATA}" -C "${TMP}/tzextract" "./${TZ_PATH}" 2>/dev/null; then
-				if [ -f "${TMP}/tzextract/${TZ_PATH}" ]; then
-					cp -f "${TMP}/tzextract/${TZ_PATH}" "${ADDON_DIR}/localtime" 2>/dev/null && TZ_EXTRACT_OK=1
-					rm -rf "${TMP}/tzextract" 2>/dev/null
-					mkdir -p "${TMP}/tzextract" 2>/dev/null
-				fi
-			fi
-		done
-		if [ ${TZ_EXTRACT_OK} -eq 1 ]; then
-			PTXT "${INFO} Timezone set: Europe/Moscow (UTC+3)"
-		else
-			PTXT "${WARNING} Failed to extract Europe/Moscow from tzdata; set later via WebUI"
-		fi
-		rm -rf "${TMP:?}/${TZ_DATA}" "${TMP:?}/usr" "${TMP:?}/tzextract" 2>/dev/null; return 0
 	fi
-	PTXT "${INFO} Available timezone/locations:"
-	tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ && /\/posix\//' | sort | cut -d'/' -f2- | awk -v I=0 -F'/' '!/\/$/{++I;printf "  "I") ";for(i=5;i<NF;i++)printf $i"/";print $NF}' | column
-	read_input_num "Select timezone" 1 ${INDEX}
-	local TZ_FILE; TZ_FILE="$(tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ &&  /\/posix\//' | sort | awk -v IDX="$CHOSEN" '{++i}i==IDX{print $0}')"
-	[ -z "${TZ_FILE}" ] && { PTXT "${ERROR} Invalid selection."; return 1; }
-	PTXT "${INFO} $(basename "${TZ_FILE}") selected"
-	tar xjf "${TMP}/${TZ_DATA}" -C "${TMP}" ./usr/share/zoneinfo/posix 2>/dev/null || true
-	mv "${TMP}/${TZ_FILE}" "${ADDON_DIR}/localtime" 2>/dev/null || PTXT "${WARNING} Unable to set timezone."; rm -rf "${TMP:?}/${TZ_DATA}" "${TMP:?}/usr" 2>/dev/null
+	if [ -z "${TZ_SRC}" ] && [ -f /etc/TZ ]; then
+		local TZ_STR; TZ_STR="$(head -1 /etc/TZ 2>/dev/null || true)"
+		case "${TZ_STR}" in
+			MSK*) TZ_SRC="Europe/Moscow" ;;        JST*) TZ_SRC="Asia/Tokyo" ;;
+			CST*) TZ_SRC="Asia/Shanghai" ;;         EST*) TZ_SRC="America/New_York" ;;
+			PST*) TZ_SRC="America/Los_Angeles" ;;   CET*) TZ_SRC="Europe/Paris" ;;
+			EET*) TZ_SRC="Europe/Helsinki" ;;       IST*) TZ_SRC="Asia/Kolkata" ;;
+			GMT*|WET*) TZ_SRC="Europe/London" ;;    HKT*) TZ_SRC="Asia/Hong_Kong" ;;
+			SGT*) TZ_SRC="Asia/Singapore" ;;        KST*) TZ_SRC="Asia/Seoul" ;;
+			AEST*|AEDT*) TZ_SRC="Australia/Sydney" ;;
+			NZST*|NZDT*) TZ_SRC="Pacific/Auckland" ;;
+			BRT*) TZ_SRC="America/Sao_Paulo" ;;
+		esac
+	fi
+	[ -z "${TZ_SRC}" ] && TZ_SRC="UTC"
+	PTXT "${INFO} Timezone: ${TZ_SRC}"
+
+	# ---- Obtain tzdata archive ----
+	if [ ${OFFLINE_MODE} -eq 1 ]; then
+		[ -f "${OFFLINE_DIR}/${TZ_DATA}" ] && TZ_DATA_PATH="${OFFLINE_DIR}/${TZ_DATA}"
+	else
+		opkg install column >/dev/null 2>&1
+		download_file "${TMP}" 644 "${RURL}/${TZ_DATA}" && TZ_DATA_PATH="${TMP}/${TZ_DATA}"
+	fi
+	[ -z "${TZ_DATA_PATH}" ] || [ ! -f "${TZ_DATA_PATH}" ] && { PTXT "${INFO} No tzdata; set timezone via WebUI later."; return 0; }
+
+	# ---- Extract timezone from archive ----
+	mkdir -p "${ADDON_DIR}" "${TMP}/tzextract" 2>/dev/null
+	local TZ_EXTRACT_OK=0 TZ_PATH
+	for TZ_PATH in "usr/share/zoneinfo/posix/${TZ_SRC}" "usr/share/zoneinfo/${TZ_SRC}"; do
+		tar xjf "${TZ_DATA_PATH}" -C "${TMP}/tzextract" "./${TZ_PATH}" 2>/dev/null || continue
+		[ -f "${TMP}/tzextract/${TZ_PATH}" ] && { cp -f "${TMP}/tzextract/${TZ_PATH}" "${ADDON_DIR}/localtime"; TZ_EXTRACT_OK=1; break; }
+	done
+	if [ ${TZ_EXTRACT_OK} -eq 0 ] && [ "${TZ_SRC}" = "Europe/Moscow" ]; then
+		for TZ_PATH in "usr/share/zoneinfo/posix/W-SU" "usr/share/zoneinfo/W-SU"; do
+			tar xjf "${TZ_DATA_PATH}" -C "${TMP}/tzextract" "./${TZ_PATH}" 2>/dev/null || continue
+			[ -f "${TMP}/tzextract/${TZ_PATH}" ] && { cp -f "${TMP}/tzextract/${TZ_PATH}" "${ADDON_DIR}/localtime"; TZ_EXTRACT_OK=1; break; }
+		done
+	fi
+	rm -rf "${TMP:?}/tzextract" "${TMP:?}/${TZ_DATA}" 2>/dev/null
+	[ ${TZ_EXTRACT_OK} -eq 1 ] && { PTXT "${INFO} Timezone set."; return 0; }
+	PTXT "${WARNING} Failed to extract ${TZ_SRC} from tzdata; set via WebUI later."
 }
 
 setup_AdGuardHome() {
@@ -865,7 +873,7 @@ BRANCH="$(sanitize_branch "${BRANCH}")"; write_conf INSTALLER_BRANCH "\"${BRANCH
 [ -z "$(nvram get odmpid 2>/dev/null)" ] && ROUTER_MODEL="$(nvram get productid 2>/dev/null)" || ROUTER_MODEL="$(nvram get odmpid 2>/dev/null)"
 [ -z "${ROUTER_MODEL}" ] && PTXT "${ERROR} Unsupported router." && sleep 3s && exit 1
 [ "$(nvram get sw_mode 2>/dev/null)" != "1" ] && PTXT "${ERROR} Not in router mode." && sleep 3s && exit 1
-RURL="https://raw.githubusercontent.com/jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer/${BRANCH}"
+RURL="https://raw.githubusercontent.com/halibotee/AdguardHome/${BRANCH}"
 ROUTER_OS="$(/bin/uname)"
 ! PTXT "${ROUTER_MODEL}" | grep -vE "RT-AC(86|2900)" | grep -q "AC" && ROUTER_ARCH="$(/bin/uname -m)" || ROUTER_ARCH="armv7"
 NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3})|(((172\.(1[6-9]|2[0-9]|3[0-1]))|(192\.168))(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){2}))$\b')"
@@ -877,9 +885,9 @@ NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]
 
 case "${ROUTER_OS}" in Linux) [ -z "$2" ] && PTXT "${INFO} Linux platform."; ROUTER_OS="linux";; *) PTXT "${ERROR} Unsupported OS."; exit 1;; esac
 case "$(/bin/uname -m)" in
-	aarch64|arm64) ROUTER_ARCH="arm64"; URL_ARCH="${RURL}/armv8"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
-	armv7l) ROUTER_ARCH="armv7"; URL_ARCH="${RURL}/${ROUTER_ARCH}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
-	armv7) ROUTER_ARCH="armv5"; URL_ARCH="${RURL}/${ROUTER_ARCH}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	aarch64|arm64) ROUTER_ARCH="arm64"; URL_ARCH="${RURL}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	armv7l) ROUTER_ARCH="armv7"; URL_ARCH="${RURL}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	armv7) ROUTER_ARCH="armv5"; URL_ARCH="${RURL}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
 	*) PTXT "${ERROR} Unsupported arch."; exit 1;;
 esac
 [ -z "$2" ] && PTXT "${INFO} Architecture: ${ROUTER_ARCH}"

@@ -1,128 +1,39 @@
 #!/bin/sh
 ###############################################################################
-# AdGuardHome 一键安装脚本 (RT-AX86U / aarch64 离线)
+# AdGuardHome 一键安装/交互安装脚本 (在线模式)
 #
 # 用法:
-#   sh install.sh                       # 默认安装到 /tmp/AdguardHome_setup
-#   sh install.sh /opt/agh-setup       # 指定目录
-#   INSTALL_DIR=/jffs/agh sh install.sh # 用环境变量
+#   sh install.sh                    # 交互式菜单安装
+#   sh install.sh install            # 一键自动安装
+#   sh install.sh update             # 一键自动更新
+#   sh install.sh uninstall          # 一键卸载
+#   sh install.sh {branch} {action}  # 指定分支和动作
 #
-# 离线运行,无网络依赖. 自动:
-#   1. 下载仓库所有文件
-#   2. 设置可执行权限
-#   3. 调用 installer 进入交互式安装
-#
-# 如果 Entware/python3-bcrypt/column 未预装, 会失败.
+# 依赖: curl, Entware (/opt), 已开启 JFFS
 ###############################################################################
 
 set -e
 
 REPO_BASE="https://raw.githubusercontent.com/halibotee/AdguardHome/main"
-INSTALL_DIR="${1:-${INSTALL_DIR:-/tmp/AdguardHome_setup}}"
+INSTALL_DIR="${INSTALL_DIR:-/tmp/agh_install}"
 
-# 检查 git/curl
-if ! command -v curl >/dev/null 2>&1; then
-    echo "Error: curl is required but not installed."
-    exit 1
-fi
-
-# 检查 Entware (Asuswrt-Merlin 必需)
-if [ ! -d "/opt/etc" ] || [ ! -x "/opt/bin/opkg" ]; then
-    echo "Error: Entware not detected at /opt. Install Entware first."
-    exit 1
-fi
-
-# 检查预装包
-MISSING=""
-for pkg in python3 column; do
-    if ! command -v "$pkg" >/dev/null 2>&1; then
-        MISSING="$MISSING $pkg"
-    fi
+# 检查依赖
+for cmd in curl nvram nvram; do
+    command -v "$cmd" >/dev/null 2>&1 && break
 done
-if [ -n "$MISSING" ]; then
-    echo "Error: missing required packages:$MISSING"
-    echo "Run: opkg install$MISSING"
-    exit 1
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Error: curl is required."; exit 1
 fi
-if ! python3 -c 'import bcrypt' >/dev/null 2>&1 && [ ! -x /opt/bin/bcrypt-tool ]; then
-    echo "Error: password hashing unavailable. Install python3-bcrypt or bcrypt-tool."
-    echo "Run: opkg install python3-bcrypt"
-    exit 1
+if [ ! -d "/opt/etc" ] || [ ! -x "/opt/bin/opkg" ]; then
+    echo "Error: Entware not detected. Install Entware first."; exit 1
 fi
-
-# 检测架构
-ARCH="$(uname -m)"
-case "$ARCH" in
-    aarch64|arm64) TZ_ARCH="aarch64"; BIN_ARCH="arm64" ;;
-    armv7l)        TZ_ARCH="arm";     BIN_ARCH="armv7" ;;
-    armv7)         TZ_ARCH="arm";     BIN_ARCH="armv5" ;;
-    *)
-        echo "Warning: unknown arch $ARCH, assuming armv5/aarch64 fallback"
-        TZ_ARCH="aarch64"; BIN_ARCH="arm64" ;;
-esac
-
-echo "=========================================================="
-echo "  AdGuardHome Offline Installer"
-echo "  Target: $INSTALL_DIR"
-echo "  Arch:   $ARCH (bin=$BIN_ARCH tz=$TZ_ARCH)"
-echo "=========================================================="
 
 mkdir -p "$INSTALL_DIR"
+echo "Downloading installer from $REPO_BASE ..."
+curl -fsSL "$REPO_BASE/installer" -o "$INSTALL_DIR/installer" || { echo "Download failed."; exit 1; }
+chmod +x "$INSTALL_DIR/installer"
+
+echo "Starting AdGuardHome Installer..."
+echo ""
 cd "$INSTALL_DIR"
-
-# 必要文件
-FILES="installer
-AdGuardHome.sh
-S99AdGuardHome
-rc.func.AdGuardHome
-AdGuardHome.yaml
-AdguardHome_Upstreams.txt
-prepare-offline.sh
-AdGuardHome_linux_${BIN_ARCH}.tar.gz
-tzdata-2021e-1-${TZ_ARCH}.pkg.tar.bz2"
-
-# 可选文件 (其他架构的二进制, 方便以后升级路由器)
-OPTIONAL="AdGuardHome_linux_armv5.tar.gz
-AdGuardHome_linux_armv7.tar.gz
-tzdata-2021e-1-arm.pkg.tar.bz2"
-
-# 下载
-echo "[1/2] Downloading files..."
-for f in $FILES; do
-    if [ -f "$f" ] && [ -s "$f" ]; then
-        echo "  [SKIP] $f"
-        continue
-    fi
-    printf "  [FETCH] %s ... " "$f"
-    if curl -fsSL "$REPO_BASE/$f" -o "$f"; then
-        echo "OK"
-    else
-        echo "FAILED"
-        exit 1
-    fi
-done
-
-# 可选文件 (失败不致命)
-for f in $OPTIONAL; do
-    if [ -f "$f" ] && [ -s "$f" ]; then
-        continue
-    fi
-    printf "  [OPT]   %s ... " "$f"
-    if curl -fsSL "$REPO_BASE/$f" -o "$f" 2>/dev/null; then
-        echo "OK"
-    else
-        echo "skipped"
-        rm -f "$f"
-    fi
-done
-
-# 权限
-chmod +x installer S99AdGuardHome rc.func.AdGuardHome AdGuardHome.sh prepare-offline.sh 2>/dev/null
-
-echo "[2/2] Starting installer..."
-echo ""
-echo "  After install, access WebUI at: http://$(nvram get lan_ipaddr 2>/dev/null || echo 192.168.50.1):14711/"
-echo ""
-
-# 启动安装器
-AGH_OFFLINE_DIR="$(pwd)" sh installer master "$@"
+sh installer master "$@"
