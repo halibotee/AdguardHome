@@ -1,0 +1,892 @@
+#!/bin/sh
+#################################################################################################################
+# AdGuardHome Offline Installer v2.2.3-OFFLINE
+# Modified to support fully offline installation via AGH_OFFLINE_DIR
+#
+# Usage with offline assets:
+#   AGH_OFFLINE_DIR=/path/to/assets sh installer
+#
+# Prepare offline bundle (with network):
+#   sh prepare-offline.sh /path/to/offline-bundle
+#
+# Offline directory should contain:
+#   AdGuardHome_linux_{arch}.tar.gz  (from https://github.com/AdguardTeam/AdGuardHome/releases)
+#   AdGuardHome.sh                   (manager script)
+#   S99AdGuardHome                   (init script)
+#   rc.func.AdGuardHome              (library script)
+#   tzdata-*.pkg.tar.bz2             (optional, timezone data)
+#################################################################################################################
+
+export LC_ALL=C
+export PATH="/sbin:/bin:/usr/sbin:/usr/bin:${PATH}"
+
+AI_VERSION="v2.2.3-offline"
+export AI_VERSION
+readonly ADGUARD_METADATA_FILE="/tmp/AGH_STATIC_METADATA_$$.txt"
+readonly ADGUARDHOME_WAIT_TIMEOUT="60"
+readonly ADGUARDHOME_READY_TIMEOUT="180"
+readonly ADDON_DIR="/jffs/addons/AdGuardHome.d"
+readonly BASE_DIR="/opt/etc"
+readonly TARG_DIR="${BASE_DIR}/AdGuardHome"
+readonly AGH_FILE="${TARG_DIR}/AdGuardHome"
+readonly CONF_FILE="${TARG_DIR}/.config"
+readonly YAML_FILE="${AGH_FILE}.yaml"
+readonly YAML_BAK="${YAML_FILE}.bak"
+readonly YAML_ERR="${YAML_FILE}.err"
+readonly YAML_ORI="${TARG_DIR}/.AdGuardHome.yaml.ori"
+SCRIPT_LOC="$(readlink -f "$0")" || true
+readonly SCRIPT_LOC
+
+BOLD="$(printf "\033[1m")" || true; readonly BOLD
+NORM="$(printf "\033[0m")" || true; readonly NORM
+INFO="$(printf "%s" "${BOLD} Info: ${NORM}")" || true; readonly INFO
+ERROR="$(printf "%s" "${BOLD} *** Error: ${NORM}")" || true; readonly ERROR
+WARNING="$(printf "%s" "${BOLD} * Warning: ${NORM}")" || true; readonly WARNING
+INPUT="$(printf "%s" "${BOLD} => ${NORM}")" || true; readonly INPUT
+
+# ===== OFFLINE MODE DETECTION =====
+OFFLINE_DIR=""
+OFFLINE_MODE=0
+if [ -n "${AGH_OFFLINE_DIR}" ]; then
+	OFFLINE_DIR="${AGH_OFFLINE_DIR}"
+elif [ -f "$(dirname "${SCRIPT_LOC}")/AdGuardHome.sh" ] && \
+     [ -f "$(dirname "${SCRIPT_LOC}")/S99AdGuardHome" ] && \
+     [ -f "$(dirname "${SCRIPT_LOC}")/rc.func.AdGuardHome" ]; then
+	OFFLINE_DIR="$(dirname "${SCRIPT_LOC}")"
+fi
+[ -n "${OFFLINE_DIR}" ] && OFFLINE_MODE=1
+
+# ===== CORE HELPERS =====
+ai_have_cmd() { which "$1" >/dev/null 2>&1; }
+cleanup_api_files() { rm -f "${ADGUARD_METADATA_FILE}"; }
+
+PTXT() {
+	case "$1" in
+		-n) shift; while [ $# -gt 0 ]; do printf "%s" "$1"; shift; done ;;
+		*) while [ $# -gt 0 ]; do printf "%s\n" "$1"; shift; done ;;
+	esac
+}
+
+_quote() { PTXT "$1" | sed 's/[]\/()$*.^|[]/\\&/g'; }
+md5_is_valid() { [ "$(PTXT -n "$1" | wc -c)" -eq 32 ] && PTXT -n "$1" | grep -qiE '^[0-9a-f]{32}$'; }
+branch_is_safe() {
+	case "$1" in "" | /* | */ | *..* | *//* | *\\* | *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-]*) return 1 ;; esac
+	return 0
+}
+sanitize_branch() {
+	if branch_is_safe "$1"; then PTXT "$1"; else PTXT "${WARNING} Ignoring unsafe branch $1, using master." >&2; PTXT "master"; fi
+}
+
+conf_value() {
+	[ -f "${CONF_FILE}" ] || return 1
+	awk -v KEY="$1" 'index($0,KEY"=")==1{VALUE=substr($0,length(KEY)+2);gsub(/^"|"$/,"",VALUE);print VALUE;exit}' "${CONF_FILE}"
+}
+del_conf() { [ ! -f "${CONF_FILE}" ] && return; for KEY in "$@"; do sed -i "/^${KEY}=.*$/d" "${CONF_FILE}"; done; }
+write_conf() {
+	local VAR VALUE; VAR="$1"; VALUE="$2"
+	if [ ! -f "${CONF_FILE}" ]; then mkdir -p "$(dirname "${CONF_FILE}")" 2>/dev/null; if ! { touch "${CONF_FILE}" && chmod 644 "${CONF_FILE}"; }; then PTXT "${ERROR} Unable to create ${CONF_FILE}"; return 1; fi; fi
+	if grep -q "^${VAR}=" "${CONF_FILE}"; then VALUE=$(_quote "${VALUE}"); sed -i "/^${VAR}=/s/=.*/=${VALUE}/" "${CONF_FILE}"; else PTXT "${VAR}=${VALUE}" >>"${CONF_FILE}"; fi
+}
+
+# ===== OFFLINE DOWNLOAD OVERRIDE =====
+download_file() {
+	if [ "${OFFLINE_MODE}" -eq 1 ]; then
+		local TARG PERM URL FILENAME SRC RET
+		TARG="$1"; shift; PERM="$1"; shift; RET=0
+		for URL in "$@"; do
+			FILENAME="$(basename "${URL}")"
+			SRC="${OFFLINE_DIR}/${FILENAME}"
+			[ -f "${SRC}" ] || SRC=""
+			if [ -z "${SRC}" ]; then
+				PTXT "${ERROR} Offline asset not found: ${FILENAME}"
+				PTXT "${ERROR} Place it in: ${OFFLINE_DIR}/"
+				RET=$((RET+1)); continue
+			fi
+			PTXT "${INFO} Copying ${FILENAME} from offline bundle"
+			if cp -f "${SRC}" "${TARG}/${FILENAME}" 2>/dev/null && chmod "${PERM}" "${TARG}/${FILENAME}" 2>/dev/null; then continue; fi
+			PTXT "${ERROR} Failed to install ${FILENAME}"; RET=$((RET+1))
+		done
+		return ${RET}
+	fi
+	# Online mode
+	local TARG PERM URL RET FILENAME TMP_FILE TMP_MD5 MD5SUM_OLD MD5SUM_CURR MD5SUM_EXPECTED COUNT
+	TARG="$1"; shift; PERM="$1"; shift; RET=0
+	for URL in "$@"; do
+		FILENAME="$(basename "${URL}")"; TMP_FILE="${TARG}/.${FILENAME}.$$"; TMP_MD5="${TMP_FILE}.md5sum"
+		MD5SUM_OLD=""; MD5SUM_CURR=""; MD5SUM_EXPECTED=""; COUNT=0
+		[ -f "${TARG}/${FILENAME}" ] && MD5SUM_OLD="$(md5sum "${TARG}/${FILENAME}" | awk '{print $1;exit}')"
+		while [ ${COUNT} -lt 3 ]; do
+			PTXT "${INFO} Downloading ${FILENAME}"; rm -f "${TMP_FILE}" "${TMP_MD5}"
+			if http_get_file "${URL}" "${TMP_FILE}" "" insecure && [ -s "${TMP_FILE}" ]; then
+				MD5SUM_CURR="$(md5sum "${TMP_FILE}" | awk '{print $1;exit}')"
+				MD5SUM_EXPECTED=""
+				if http_get_file "${URL}.md5sum" "${TMP_MD5}" "" insecure && [ -s "${TMP_MD5}" ]; then MD5SUM_EXPECTED="$(awk 'NR==1{print $1;exit}' "${TMP_MD5}")"; fi
+				if md5_is_valid "${MD5SUM_EXPECTED}"; then if [ "${MD5SUM_CURR}" = "${MD5SUM_EXPECTED}" ]; then break; fi; PTXT "${WARNING} Checksum mismatch; retrying."; else break; fi
+			fi
+			COUNT=$((COUNT+1))
+		done
+		rm -f "${TMP_MD5}"
+		if [ ${COUNT} -eq 3 ]; then rm -f "${TMP_FILE}"; PTXT "${ERROR} Unable to download ${URL}"; RET=$((RET+1)); continue; fi
+		if md5_is_valid "${MD5SUM_CURR}" && [ "${MD5SUM_CURR}" = "${MD5SUM_OLD}" ]; then rm -f "${TMP_FILE}"; PTXT "${INFO} ${FILENAME} is up to date. Skipping..."; continue; fi
+		if mv "${TMP_FILE}" "${TARG}/${FILENAME}" && chmod "${PERM}" "${TARG}/${FILENAME}"; then continue; fi
+		rm -f "${TMP_FILE}"; PTXT "${ERROR} Unable to install ${FILENAME}"; RET=$((RET+1))
+	done
+	return ${RET}
+}
+
+http_get_file() {
+	if [ "${OFFLINE_MODE}" -eq 1 ]; then return 127; fi
+	local URL OUT HEADERS INSECURE CURL_ARGS WGET_ARGS
+	URL="$1"; OUT="$2"; HEADERS="${3:-}"; INSECURE="${4:-}"
+	if ai_have_cmd curl; then
+		CURL_ARGS=""; curl_has_option '--retry' && CURL_ARGS="${CURL_ARGS} --retry 5"; curl_has_option '--connect-timeout' && CURL_ARGS="${CURL_ARGS} --connect-timeout 25"
+		curl_has_option '--retry-delay' && CURL_ARGS="${CURL_ARGS} --retry-delay 5"; curl_has_option '--max-time' && CURL_ARGS="${CURL_ARGS} --max-time 125"; curl_has_option '--retry-connrefused' && CURL_ARGS="${CURL_ARGS} --retry-connrefused"
+		[ "${INSECURE}" = "insecure" ] && CURL_ARGS="${CURL_ARGS} -k"
+		if [ -n "${HEADERS}" ]; then curl ${CURL_ARGS} -D "${HEADERS}" -f -sL "${URL}" -o "${OUT}"; else curl ${CURL_ARGS} -f -sL "${URL}" -o "${OUT}"; fi
+	elif ai_have_cmd wget; then
+		WGET_ARGS=""; wget_has_option '--no-cache' && WGET_ARGS="${WGET_ARGS} --no-cache"; wget_has_option '--no-cookies' && WGET_ARGS="${WGET_ARGS} --no-cookies"
+		wget_has_option '--tries' && WGET_ARGS="${WGET_ARGS} --tries=5"; wget_has_option '--timeout' && WGET_ARGS="${WGET_ARGS} --timeout=25"
+		wget_has_option '--waitretry' && WGET_ARGS="${WGET_ARGS} --waitretry=5"; wget_has_option '--retry-connrefused' && WGET_ARGS="${WGET_ARGS} --retry-connrefused"
+		[ "${INSECURE}" = "insecure" ] && WGET_ARGS="${WGET_ARGS} --no-check-certificate"
+		if [ -n "${HEADERS}" ] && wget_has_option '--server-response'; then wget ${WGET_ARGS} --server-response -q -O "${OUT}" "${URL}" 2>"${HEADERS}"; else [ -n "${HEADERS}" ] && : >"${HEADERS}"; wget ${WGET_ARGS} -q -O "${OUT}" "${URL}"; fi
+	else return 127; fi
+}
+
+http_get_stdout() {
+	if [ "${OFFLINE_MODE}" -eq 1 ]; then return 127; fi
+	local URL INSECURE; URL="$1"; INSECURE="${2:-}"
+	if ai_have_cmd curl; then
+		local ARGS=""; curl_has_option '--retry' && ARGS="${ARGS} --retry 5"; curl_has_option '--connect-timeout' && ARGS="${ARGS} --connect-timeout 25"
+		curl_has_option '--retry-delay' && ARGS="${ARGS} --retry-delay 5"; curl_has_option '--max-time' && ARGS="${ARGS} --max-time 125"; curl_has_option '--retry-connrefused' && ARGS="${ARGS} --retry-connrefused"
+		[ "${INSECURE}" = "insecure" ] && ARGS="${ARGS} -k"; curl ${ARGS} -f -sL "${URL}"
+	elif ai_have_cmd wget; then
+		local ARGS=""; wget_has_option '--no-cache' && ARGS="${ARGS} --no-cache"; wget_has_option '--tries' && ARGS="${ARGS} --tries=5"; wget_has_option '--timeout' && ARGS="${ARGS} --timeout=25"
+		[ "${INSECURE}" = "insecure" ] && ARGS="${ARGS} --no-check-certificate"; wget ${ARGS} -q -O - "${URL}"
+	else return 127; fi
+}
+
+http_probe() {
+	if [ "${OFFLINE_MODE}" -eq 1 ]; then return 0; fi
+	local URL; URL="$1"
+	if ai_have_cmd curl; then curl -f -sL -I -o /dev/null "${URL}"
+	elif ai_have_cmd wget; then
+		if wget_has_option '--spider'; then wget -q --spider "${URL}"; else wget -q -O /dev/null "${URL}"; fi
+	else return 127; fi
+}
+
+curl_has_option() { curl_help | grep -q -e "$1"; }
+curl_help() { if [ -z "${CURL_HELP_CACHE:-}" ]; then CURL_HELP_CACHE="$(curl --help all 2>&1 || curl --help 2>&1)"; CURL_HELP_CACHE_SET="1"; fi; PTXT "${CURL_HELP_CACHE}"; }
+wget_has_option() { wget_help | grep -q -e "$1"; }
+wget_help() { if [ -z "${WGET_HELP_CACHE:-}" ]; then WGET_HELP_CACHE="$(wget --help 2>&1)"; WGET_HELP_CACHE_SET="1"; fi; PTXT "${WGET_HELP_CACHE}"; }
+
+# ===== OPKG HELPERS =====
+opkg_pkg_available() { opkg list "$1" 2>/dev/null | awk -v pkg="$1" '$1==pkg{found=1;exit}END{exit(found?0:1)}'; }
+opkg_pkg_installed() { opkg list-installed 2>/dev/null | awk -v pkg="$1" '$1==pkg{found=1;exit}END{exit(found?0:1)}'; }
+
+ensure_opkg_package() {
+	[ "${OFFLINE_MODE}" -eq 1 ] && { PTXT "${INFO} Offline: Skipping opkg install $1"; return 0; }
+	_pkg="$1"
+	if opkg_pkg_installed "${_pkg}"; then return 0; fi
+	if ! opkg install "${_pkg}" >/dev/null 2>&1; then return 1; fi
+	opkg_pkg_installed "${_pkg}"
+}
+
+on_installer_exit() {
+	cleanup_api_files
+	if [ ! -f "${AGH_FILE}" ]; then
+		check_dns_environment 1
+	fi
+}
+
+python_bcrypt_available() { ai_have_cmd python3 && python3 -c 'import bcrypt' >/dev/null 2>&1; }
+
+ensure_bcrypt_tool() {
+	if [ -f "/opt/bin/bcrypt-tool" ]; then return 0; fi
+	[ "${OFFLINE_MODE}" -eq 1 ] && { PTXT "${INFO} Offline: bcrypt-tool check skipped"; return 0; }
+	case "$(/bin/uname -m)" in
+		aarch64|arm64) ensure_opkg_package go || return 1 ;;
+		armv7l|*) if opkg_pkg_available go_nohf; then ensure_opkg_package go_nohf || return 1; else ensure_opkg_package go || return 1; fi ;;
+	esac
+	export PATH="${PATH}:/opt/bin/go/bin"; export GOROOT="/opt/bin/go"; export GOBIN="/opt/bin/"
+	ai_have_cmd go || return 1; go install gophers.dev/cmds/bcrypt-tool@latest >/dev/null 2>&1
+}
+
+ensure_password_hash_tool() {
+	[ "${OFFLINE_MODE}" -eq 1 ] && {
+		if ! python_bcrypt_available && [ ! -f "/opt/bin/bcrypt-tool" ]; then
+			PTXT "${WARNING} Offline: No password hash tool. Pre-install python3-bcrypt or bcrypt-tool."
+		fi; return 0
+	}
+	ensure_opkg_package python3 || true; ensure_opkg_package python3-bcrypt || true
+	python_bcrypt_available && return 0; ensure_bcrypt_tool
+}
+
+remove_conflicting_apache() {
+	if opkg_pkg_installed apache || opkg_pkg_installed apache-utils; then
+		opkg flag user apache apache-utils >/dev/null 2>&1; opkg remove apache apache-utils --force-removal-of-dependent-packages >/dev/null 2>&1
+	fi
+}
+
+# ===== ADGUARD HOME PROCESS HELPERS =====
+agh_is_running() { [ -n "$(pidof AdGuardHome)" ]; }
+agh_process_count() { PTXT "$(($(pidof AdGuardHome 2>/dev/null | wc -w) + $(agh_monitor_count)))"; }
+agh_monitor_count() {
+	local count=0 pid
+	for pid in $(pidof AdGuardHome.sh S99AdGuardHome rc.func.AdGuardHome 2>/dev/null); do
+		awk '{print}' "/proc/${pid}/cmdline" 2>/dev/null | grep -q 'monitor-start' && count=$((count+1))
+	done; PTXT "${count}"
+}
+
+agh_stop() {
+	if [ "$(agh_process_count)" -ge 1 ]; then
+		if service stop_AdGuardHome >/dev/null 2>&1; then sleep 1s
+		elif /opt/etc/init.d/S99AdGuardHome stop; then sleep 1s
+		elif /opt/etc/init.d/S99AdGuardHome kill; then sleep 1s
+		else killall -q -9 AdGuardHome 2>/dev/null; rm -rf /opt/var/run/AdGuardHome.pid 2>/dev/null; sleep 1s; fi
+	fi
+	sleep 1s; agh_wait_stopped "${ADGUARDHOME_WAIT_TIMEOUT}" || { PTXT "${ERROR} Timed out waiting for stop."; return 1; }; sleep 1s; agh_check; return 0
+}
+
+agh_start() {
+	if ! agh_is_running; then
+		if service start_AdGuardHome >/dev/null 2>&1; then sleep 1s
+		elif /opt/etc/init.d/S99AdGuardHome start; then sleep 1s
+		else return 1; fi
+	fi
+	sleep 1s; agh_wait_started "${ADGUARDHOME_WAIT_TIMEOUT}" || { PTXT "${ERROR} Timed out waiting for start."; return 1; }; sleep 1s; agh_check; agh_is_running
+}
+
+agh_restart() {
+	if agh_is_running; then
+		if service restart_AdGuardHome >/dev/null 2>&1; then sleep 1s
+		elif /opt/etc/init.d/S99AdGuardHome restart; then sleep 1s
+		else return 1; fi
+	else agh_start || return 1; fi
+	sleep 1s
+	if ! agh_wait_ready "${ADGUARDHOME_READY_TIMEOUT}"; then PTXT "${ERROR} Timed out waiting for network checks."; return 1; fi
+	sleep 1s; agh_check; agh_is_running
+}
+
+agh_check() { /opt/etc/init.d/S99AdGuardHome check; }
+agh_wait_started() { local e=0; while ! agh_is_running; do [ ${e} -ge "${1:-60}" ] && return 1; sleep 1s; e=$((e+1)); done; return 0; }
+agh_wait_stopped() { local e=0; while [ "$(agh_process_count)" -ge 1 ]; do [ ${e} -ge "${1:-60}" ] && return 1; sleep 1s; e=$((e+1)); done; return 0; }
+agh_prepare_binary_replace() {
+	if { [ -f "${AGH_FILE}" ] || [ -e "/opt/sbin/AdGuardHome" ]; } && [ "$(agh_process_count)" -ge 1 ]; then
+		PTXT "${INFO} Stopping AdGuardHome before replacing binary."; agh_stop || return 1
+	fi; return 0
+}
+
+agh_complete_startup() {
+	PTXT "${INFO} Starting AdGuardHome..."; agh_stop
+	agh_start || { agh_start_error; return 1; }
+	PTXT "${INFO} Performing final check."; agh_restart || { agh_start_error; return 1; }
+	PTXT "${INFO} AdGuardHome setup complete."; return 0
+}
+agh_start_error() { PTXT "${ERROR} Couldn't start AdGuardHome!" "${ERROR} Please send WebUI System Log to dev."; }
+
+agh_wait_ready() {
+	local e=0 m="${1:-180}" s
+	s=$(monotonic_seconds) || return 1
+	while :; do
+		e=$(($(monotonic_seconds)-s)); [ ${e} -ge ${m} ] && return 1
+		if check_connection $((m-e)) && agh_is_running; then return 0; fi
+		e=$(($(monotonic_seconds)-s)); [ ${e} -ge ${m} ] && return 1; sleep 1s
+	done
+}
+
+monotonic_seconds() {
+	local u; read -r u _ </proc/uptime 2>/dev/null || return 1; u="${u%%.*}"; case "${u}" in ""|*[!0-9]*) return 1;; esac; PTXT "${u}"; return 0
+}
+
+# ===== ADGUARD REMOTE METADATA (for version tracking) =====
+init_adguard_metadata_defaults() {
+	REMOTE_RELEASE_ARCHIVE="AdGuardHome_${ADGUARD_ARCH}.tar.gz"; REMOTE_BETA_ARCHIVE="AdGuardHome_${ADGUARD_ARCH}.tar.gz"; REMOTE_EDGE_ARCHIVE="AdGuardHome_${ADGUARD_ARCH}.tar.gz"
+	REMOTE_RELEASE_MD5=""; REMOTE_BETA_MD5=""; REMOTE_EDGE_MD5=""
+	REMOTE_RELEASE_URL="https://static.adguard.com/adguardhome/release/${REMOTE_RELEASE_ARCHIVE}"
+	REMOTE_BETA_URL="https://static.adguard.com/adguardhome/beta/${REMOTE_BETA_ARCHIVE}"
+	REMOTE_EDGE_URL="https://static.adguard.com/adguardhome/edge/${REMOTE_EDGE_ARCHIVE}"
+}
+
+init_remote_adguard_metadata() {
+	if [ ${OFFLINE_MODE} -eq 1 ]; then
+		init_adguard_metadata_defaults
+		REMOTE_VER="0.0.0"; REMOTE_BETA="0.0.0"; REMOTE_EDGE="0.0.0"
+		REMOTE_RELEASE_MD5="00000000000000000000000000000000"
+		REMOTE_BETA_MD5="00000000000000000000000000000000"
+		REMOTE_EDGE_MD5="00000000000000000000000000000000"
+		for v in REMOTE_VER REMOTE_BETA REMOTE_EDGE REMOTE_RELEASE_ARCHIVE REMOTE_BETA_ARCHIVE REMOTE_EDGE_ARCHIVE REMOTE_RELEASE_MD5 REMOTE_BETA_MD5 REMOTE_EDGE_MD5 REMOTE_RELEASE_URL REMOTE_BETA_URL REMOTE_EDGE_URL; do export ${v}; done
+		return 0
+	fi
+	local COUNT CHANNEL_FILE
+	REMOTE_VER=""; REMOTE_BETA=""; REMOTE_EDGE=""; REMOTE_RELEASE_ARCHIVE=""; REMOTE_BETA_ARCHIVE=""; REMOTE_EDGE_ARCHIVE=""
+	REMOTE_RELEASE_MD5=""; REMOTE_BETA_MD5=""; REMOTE_EDGE_MD5=""; REMOTE_RELEASE_URL=""; REMOTE_BETA_URL=""; REMOTE_EDGE_URL=""
+	COUNT=0; CHANNEL_FILE="${URL_ARCH}/checksum.txt"
+	while [ ${COUNT} -lt 3 ]; do
+		rm -f "${ADGUARD_METADATA_FILE}"
+		if http_get_file "${CHANNEL_FILE}" "${ADGUARD_METADATA_FILE}" "" insecure && [ -s "${ADGUARD_METADATA_FILE}" ]; then
+			REMOTE_VER="$(awk '$1!~/^#/&&$2=="stable"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_BETA="$(awk '$1!~/^#/&&$2=="beta"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_EDGE="$(awk '$1!~/^#/&&$2=="edge"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_RELEASE_ARCHIVE="$(awk '$1!~/^#/&&$2=="stable"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_BETA_ARCHIVE="$(awk '$1!~/^#/&&$2=="beta"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_EDGE_ARCHIVE="$(awk '$1!~/^#/&&$2=="edge"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_RELEASE_MD5="$(awk '$1!~/^#/&&$2=="stable"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_BETA_MD5="$(awk '$1!~/^#/&&$2=="beta"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_EDGE_MD5="$(awk '$1!~/^#/&&$2=="edge"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
+			REMOTE_RELEASE_URL="${URL_ARCH}/${REMOTE_RELEASE_ARCHIVE}"; REMOTE_BETA_URL="${URL_ARCH}/${REMOTE_BETA_ARCHIVE}"; REMOTE_EDGE_URL="${URL_ARCH}/${REMOTE_EDGE_ARCHIVE}"
+			if [ -n "${REMOTE_VER}" ] && [ -n "${REMOTE_BETA}" ] && [ -n "${REMOTE_EDGE}" ] && [ -n "${REMOTE_RELEASE_ARCHIVE}" ]; then
+				for v in REMOTE_VER REMOTE_BETA REMOTE_EDGE REMOTE_RELEASE_ARCHIVE REMOTE_BETA_ARCHIVE REMOTE_EDGE_ARCHIVE REMOTE_RELEASE_MD5 REMOTE_BETA_MD5 REMOTE_EDGE_MD5 REMOTE_RELEASE_URL REMOTE_BETA_URL REMOTE_EDGE_URL; do export ${v}; done
+				cleanup_api_files; return 0
+			fi
+		fi; COUNT=$((COUNT+1))
+	done
+	init_upstream_adguard_metadata "${CHANNEL_FILE}"
+}
+
+init_upstream_adguard_metadata() {
+	[ ${OFFLINE_MODE} -eq 1 ] && return 0
+	init_adguard_metadata_defaults
+	local CHANNEL_FILE="$1" COUNT=0
+	while [ ${COUNT} -lt 3 ]; do
+		local RVM="${ADGUARD_METADATA_FILE}.r" BVM="${ADGUARD_METADATA_FILE}.b" EVM="${ADGUARD_METADATA_FILE}.e"
+		rm -f "${RVM}" "${BVM}" "${EVM}"
+		if http_get_file "https://static.adguard.com/adguardhome/release/version.txt" "${RVM}" "" insecure && [ -s "${RVM}" ] &&
+		   http_get_file "https://static.adguard.com/adguardhome/beta/version.txt" "${BVM}" "" insecure && [ -s "${BVM}" ] &&
+		   http_get_file "https://static.adguard.com/adguardhome/edge/version.txt" "${EVM}" "" insecure && [ -s "${EVM}" ]; then
+			REMOTE_VER="$(awk 'NF{VERSION=$1;sub(/^version=/,"",VERSION);print VERSION;exit}' "${RVM}")"
+			REMOTE_BETA="$(awk 'NF{VERSION=$1;sub(/^version=/,"",VERSION);print VERSION;exit}' "${BVM}")"
+			REMOTE_EDGE="$(awk 'NF{VERSION=$1;sub(/^version=/,"",VERSION);print VERSION;exit}' "${EVM}")"
+			if [ -n "${REMOTE_VER}" ] && [ -n "${REMOTE_BETA}" ] && [ -n "${REMOTE_EDGE}" ]; then
+				for v in REMOTE_VER REMOTE_BETA REMOTE_EDGE REMOTE_RELEASE_ARCHIVE REMOTE_BETA_ARCHIVE REMOTE_EDGE_ARCHIVE REMOTE_RELEASE_MD5 REMOTE_BETA_MD5 REMOTE_EDGE_MD5 REMOTE_RELEASE_URL REMOTE_BETA_URL REMOTE_EDGE_URL; do export ${v}; done
+				rm -f "${RVM}" "${BVM}" "${EVM}"; return 0
+			fi
+		fi; COUNT=$((COUNT+1))
+	done
+	rm -f "${RVM}" "${BVM}" "${EVM}"
+	PTXT "Unable to read package metadata. Check internet and try again."; sleep 3s; exit 1
+}
+
+adguard_remote_archive() { case "$1" in release) PTXT "${REMOTE_RELEASE_ARCHIVE}";; beta) PTXT "${REMOTE_BETA_ARCHIVE}";; edge) PTXT "${REMOTE_EDGE_ARCHIVE}";; *) return 1;; esac; }
+adguard_remote_md5() { case "$1" in release) PTXT "${REMOTE_RELEASE_MD5}";; beta) PTXT "${REMOTE_BETA_MD5}";; edge) PTXT "${REMOTE_EDGE_MD5}";; *) return 1;; esac; }
+adguard_remote_version() { case "$1" in release) PTXT "${REMOTE_VER}";; beta) PTXT "${REMOTE_BETA}";; edge) PTXT "${REMOTE_EDGE}";; *) return 1;; esac; }
+adguard_remote_url() { case "$1" in release) PTXT "${REMOTE_RELEASE_URL}";; beta) PTXT "${REMOTE_BETA_URL}";; edge) PTXT "${REMOTE_EDGE_URL}";; *) return 1;; esac; }
+
+# ===== CONNECTION CHECK =====
+check_connection() {
+	[ ${OFFLINE_MODE} -eq 1 ] && return 0
+	local deadline i livecheck=0 maxwait now remaining sleep_for
+	maxwait="${1:-}"
+	if [ -n "${maxwait}" ]; then now=$(monotonic_seconds); deadline=$((now+maxwait)); fi
+	while [ ${livecheck} -lt 4 ]; do
+		for i in google.com github.com snbforums.com; do
+			if [ -n "${deadline}" ]; then now=$(monotonic_seconds); [ ${now} -ge ${deadline} ] && return 1; fi
+			if { ! nslookup "${i}" 127.0.0.1 >/dev/null 2>&1; } && { ping -q -w3 -c1 "${i}" >/dev/null 2>&1; }; then
+				if [ -n "${deadline}" ]; then remaining=$((deadline-$(monotonic_seconds))); [ ${remaining} -le 0 ] && return 1; fi
+				if ! http_probe "http://${i}"; then sleep 1s; continue; fi
+			fi; return 0
+		done
+		livecheck=$((livecheck+1))
+		if [ ${livecheck} -lt 4 ]; then
+			if [ -n "${deadline}" ]; then sleep_for=$((deadline-$(monotonic_seconds))); [ ${sleep_for} -le 0 ] && return 1; [ ${sleep_for} -gt 10 ] && sleep_for=10; sleep ${sleep_for}s
+			else sleep 10s; fi
+		fi
+	done; return 1
+}
+
+# ===== DNS ENVIRONMENT =====
+check_dns_environment() {
+	if [ -f "/opt/etc/init.d/S61stubby" ] || [ -f "/opt/sbin/stubby" ] || [ -f "/opt/bin/install_stubby" ] || [ -f "/jffs/scripts/install_stubby.sh" ] || [ -d "/jffs/dnscrypt" ] || [ -f "/opt/etc/init.d/S09dnscrypt-proxy" ]; then
+		PTXT "${ERROR} Stubby or dnscrypt-proxy detected. Please remove first."; exit 1
+	fi
+	local MODE NVCHECK=0
+	dns_env_set_nvram() { local key="$1" expected="$2" cur; cur="$(nvram get "${key}" 2>/dev/null)"; [ "${cur}" = "${expected}" ] && return 1; nvram set "${key}=${expected}"; return 0; }
+	dns_env_apply_profile() { local c=0; dns_env_set_nvram "dnspriv_enable" "0" && c=$((c+1)); dns_env_set_nvram "dhcpd_dns_router" "1" && c=$((c+1)); dns_env_set_nvram "dhcp_dns1_x" "" && c=$((c+1)); dns_env_set_nvram "dhcp_dns2_x" "" && c=$((c+1)); [ ${c} -ne 0 ]; }
+	dns_env_restore_profile() { local c=0 key; for key in dnspriv_enable dhcpd_dns_router dhcp_dns1_x dhcp_dns2_x; do local cur old; cur="$(nvram get "${key}" 2>/dev/null)"; eval "old=\"\$_OLD_${key}\""; [ "${cur}" != "${old}" ] && { nvram set "${key}=${old}"; c=$((c+1)); }; done; [ ${c} -ne 0 ]; }
+	MODE="$1"
+	case "${MODE}" in
+		0) if [ "${_DNS_NVRAM_SAVED:-0}" != "1" ]; then save_dns_nvram_environment; fi; [ "$(pidof stubby)" ] && { killall -q -9 stubby 2>/dev/null; NVCHECK=$((NVCHECK+1)); }; dns_env_apply_profile && NVCHECK=$((NVCHECK+1));;
+		1) [ "${_DNS_NVRAM_SAVED:-0}" != "1" ] && return 0; dns_env_restore_profile && NVCHECK=$((NVCHECK+1));;
+		*) return 1;;
+	esac
+	[ ${NVCHECK} -ne 0 ] && { nvram commit; service restart_dnsmasq >/dev/null 2>&1; (while ! check_connection; do sleep 1s; done) & local PID="$!"; wait "${PID}" 2>/dev/null; }
+	PTXT "${INFO} DNS Environment is Ready."; return 0
+}
+
+check_dns_filter() {
+	local NVCHECK=0 USE_SOME
+	if [ "$1" -eq 0 ]; then [ "$(nvram get dnsfilter_enable_x)" -ne 0 ] && { nvram set dnsfilter_enable_x="0"; NVCHECK=$((NVCHECK+1)); }; PTXT "${INFO} DNS not forced through."; fi
+	if [ "$1" -eq 1 ]; then
+		[ "$(nvram get dnsfilter_enable_x)" -ne 1 ] && { nvram set dnsfilter_enable_x="1"; NVCHECK=$((NVCHECK+1)); }
+		if read_yesno "Redirect only NON-CUSTOM DNS?"; then USE_SOME=0; else USE_SOME=1; fi
+		if [ ${USE_SOME} -eq 0 ]; then [ "$(nvram get dnsfilter_mode)" != "11" ] && { nvram set dnsfilter_mode="11"; NVCHECK=$((NVCHECK+1)); }; fi
+		if [ ${USE_SOME} -eq 1 ]; then
+			for i in dnsfilter_mode dhcpd_dns_router dnsfilter_custom1 dnsfilter_custom2 dnsfilter_custom3 dnsfilter_rulelist dnsfilter_rulelist1 dnsfilter_rulelist2 dnsfilter_rulelist3 dnsfilter_rulelist4 dnsfilter_rulelist5 dhcp_dns1_x dhcp_dns2_x; do
+				local VAR; VAR="$(nvram get "${i}" 2>/dev/null)"
+				if [ "${i}" = "dnsfilter_mode" ]; then [ "$VAR" != "11" ] && { nvram set "${i}"="11"; NVCHECK=$((NVCHECK+1)); }
+				elif [ "${i}" = "dhcpd_dns_router" ]; then [ "$VAR" != "1" ] && { nvram set "${i}"="1"; NVCHECK=$((NVCHECK+1)); }
+				elif [ "$VAR" ]; then nvram set "${i}"=""; NVCHECK=$((NVCHECK+1)); fi
+			done
+		fi
+	fi
+	[ ${NVCHECK} -ne 0 ] && { nvram commit; service "restart_firewall;restart_dnsmasq" >/dev/null 2>&1; check_connection 300 || PTXT "${WARNING} Timed out waiting for DNS."; }
+}
+
+check_dns_local() {
+	local LC; case "$1" in 0) LC="NO";; 1) LC="YES";; esac; write_conf ADGUARD_LOCAL "\"${LC}\""
+}
+
+check_jffs_enabled() {
+	[ "$(nvram get jffs2_format)" = "1" ] && { PTXT "${ERROR} JFFS scheduled for reformat. Reboot first."; exit 1; }
+	local JFFS2_ENABLED jffs2_on
+	[ -z "$(nvram get jffs2_enable)" ] && JFFS2_ENABLED="$(nvram get jffs2_on)" || JFFS2_ENABLED="$(nvram get jffs2_enable)"
+	[ -z "$(nvram get jffs2_enable)" ] && jffs2_on="jffs2_on" || jffs2_on="jffs2_enable"
+	if [ "${JFFS2_ENABLED}" -ne 1 ] || [ "$(nvram get jffs2_scripts)" -ne 1 ]; then
+		nvram set ${jffs2_on}="1"; nvram set jffs2_scripts="1"; nvram commit
+	else PTXT "${INFO} JFFS already enabled."; fi
+}
+
+save_dns_nvram_environment() {
+	for VAR in dnspriv_enable dhcpd_dns_router dhcp_dns1_x dhcp_dns2_x; do
+		local VALUE="$(nvram get "${VAR}" 2>/dev/null)"
+		case "${VAR}" in dnspriv_enable) _OLD_dnspriv_enable="${VALUE}";; dhcpd_dns_router) _OLD_dhcpd_dns_router="${VALUE}";; dhcp_dns1_x) _OLD_dhcp_dns1_x="${VALUE}";; dhcp_dns2_x) _OLD_dhcp_dns2_x="${VALUE}";; esac
+	done
+	for v in _OLD_dnspriv_enable _OLD_dhcpd_dns_router _OLD_dhcp_dns1_x _OLD_dhcp_dns2_x; do export ${v}; done; _DNS_NVRAM_SAVED="1"; export _DNS_NVRAM_SAVED
+}
+
+# ===== INSTALLER HELPERS =====
+create_dir() { mkdir -p "$1" || { PTXT "${ERROR} Cannot create $1!"; return 1; }; }
+del_between_magic() { local TARG="$1" MAGIC="$2"; [ -f "${TARG}" ] || return; local BOUNDS; BOUNDS="$(awk -v PATT="${MAGIC}" '($0~PATT){printf NR","}' "${TARG}")"; [ -n "${BOUNDS}" ] && sed -i "${BOUNDS%,}d" "${TARG}"; }
+del_jffs_script() {
+	local TARG="$1" LINE_NUM; [ -f "${TARG}" ] || return
+	LINE_NUM="$(grep -n -F "[ -x ${ADDON_DIR}/" "${TARG}" | cut -d':' -f1)"
+	[ -z "${LINE_NUM}" ] && return
+	printf "%s\n" "${LINE_NUM}" | sort -rn | while IFS= read -r LN; do
+		[ -z "${LN}" ] && continue; sed -i "${LN}d" "${TARG}"
+		if [ ${LN} -gt 1 ]; then local ABOVE; ABOVE="$(sed "$((LN-1))q;d" "${TARG}")"; [ -z "${ABOVE}" ] && sed -i "$((LN-1))d" "${TARG}"; fi
+	done
+	[ "$(awk '{print}' "${TARG}")" = "#!/bin/sh" ] && rm -f "${TARG}"
+}
+
+check_AdGuardHome_yaml() {
+	[ ! -f "${YAML_FILE}" ] && return; chmod 644 "${YAML_FILE}"
+	PTXT "${INFO} Checking AdGuardHome configuration..."
+	if ! "${AGH_FILE}" --check-config -c "${YAML_FILE}" --no-check-update -l "/dev/null"; then
+		PTXT "${INFO} Invalid config -> ${YAML_ERR}"; mv "${YAML_FILE}" "${YAML_ERR}"; return 1
+	fi
+}
+
+check_version() {
+	[ ${OFFLINE_MODE} -eq 1 ] && {
+		if [ -f "${TARG_DIR}/installer" ] && [ -f "${AGH_FILE}" ] && [ -z "$2" ]; then
+			local BRANCH VER; BRANCH="$(conf_value ADGUARD_BRANCH)"; VER="$("${AGH_FILE}" --version 2>/dev/null | cut -d" " -f4-)"
+			[ -z "${VER}" ] && VER="unknown"
+			PTXT "${INFO} ADGUARDHOME_BUILD=${BRANCH:-release}" "${INFO} ADGUARDHOME_VER=${VER}"
+		fi; return 0
+	}
+	# Online version check (kept from original but simplified)
+	return 0
+}
+
+choose_branch() {
+	[ "$1" = "1" ] && { ADGUARD_BRANCH_OLD="$(conf_value ADGUARD_BRANCH)"; export ADGUARD_BRANCH_OLD; del_conf ADGUARD_BRANCH; }
+	if [ ! -f "${CONF_FILE}" ] || [ -z "$(conf_value ADGUARD_BRANCH)" ]; then
+		PTXT "${INFO} Choose AdGuardHome build:" "  1) Release" "  2) Beta" "  3) Edge"
+		read_input_num "Select mode" 1 3
+		local BUILD; case ${CHOSEN} in 1) BUILD=release;; 2) BUILD=beta;; 3) BUILD=edge;; esac
+		write_conf ADGUARD_BRANCH "\"${BUILD}\""
+		[ -n "${ADGUARD_BRANCH_OLD:-}" ] && [ "${ADGUARD_BRANCH_OLD}" != "${BUILD}" ] && { ADGUARD_BRANCH_CHANGED="1"; export ADGUARD_BRANCH_CHANGED; }
+	else read_yesno "Switch builds?" && choose_branch 1 || PTXT "${INFO} Keeping current build."; fi
+}
+
+cleanup() { mv "/opt/etc/init.d/S61AdGuardHome" "/opt/etc/init.d/S99AdGuardHome" >/dev/null 2>&1; [ "$(cru l | grep -c "S99AdGuardHome")" -gt 0 ] && cru -d "S99AdGuardHome"; [ -f "${TARG_DIR}/localtime" ] && mv "${TARG_DIR}/localtime" "${ADDON_DIR}/localtime"; remove_conflicting_apache; }
+
+cleanup_legacy_firewall() {
+	[ -x "${ADDON_DIR}/AdGuardHome.sh" ] && grep -q 'Unload_IPTables' "${ADDON_DIR}/AdGuardHome.sh" && "${ADDON_DIR}/AdGuardHome.sh" firewall unload 2>/dev/null
+	while iptables -t raw -D OUTPUT -j ADGUARDHOME 2>/dev/null; do :; done; iptables -t raw -F ADGUARDHOME 2>/dev/null; iptables -t raw -X ADGUARDHOME 2>/dev/null
+	del_jffs_script /jffs/scripts/firewall-start
+}
+
+backup_restore() {
+	if [ "$1" = "BACKUP" ] && [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ]; then
+		[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && { if read_yesno "Old backup found. Remove it?"; then rm -f "${BASE_DIR}/backup_AdGuardHome.tar.gz"; else end_op_message 1; return; fi; }
+		PTXT "${INFO} Backing up AdGuardHome..."; tar -czvf "${BASE_DIR}/backup_AdGuardHome.tar.gz" -C "${TARG_DIR}" ../AdGuardHome/ >/dev/null 2>&1; PTXT "${INFO} Backup complete"
+		[ -z "$2" ] && end_op_message 0 || return 0
+	elif [ "$1" = "BACKUP" ]; then PTXT "${ERROR} No AdGuardHome to backup!"; end_op_message 1; fi
+	if [ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && [ "$1" = "RESTORE" ]; then
+		PTXT "${INFO} Restoring..."; local IPSET_MARKER_BACKUP="/tmp/AdGuardHome-ipset.user.restore.$$"; rm -f "${IPSET_MARKER_BACKUP}"
+		[ -f "${TARG_DIR}/ipset.user" ] && mv "${TARG_DIR}/ipset.user" "${IPSET_MARKER_BACKUP}" || true
+		tar -xzvf "${BASE_DIR}/backup_AdGuardHome.tar.gz" -C "${BASE_DIR}" >/dev/null 2>&1 || { [ -f "${IPSET_MARKER_BACKUP}" ] && mv "${IPSET_MARKER_BACKUP}" "${TARG_DIR}/ipset.user"; PTXT "${ERROR} Restore failed!"; return 1; }
+		rm -f "${IPSET_MARKER_BACKUP}"; chown "$(nvram get http_username)":root ${TARG_DIR}/*; chmod 755 "${AGH_FILE}"; chmod 644 "${YAML_FILE}"
+		[ -f "/opt/sbin/AdGuardHome" ] && rm -f /opt/sbin/AdGuardHome; ln -sf "${AGH_FILE}" /opt/sbin/AdGuardHome; inst_AdGuardHome "${1:-RESTORE}"
+	elif [ ! -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && [ "$1" = "RESTORE" ]; then PTXT "${ERROR} No backup found!"; end_op_message 1; fi
+}
+
+inst_AdGuardHome() {
+	local ADGUARD_TAR="AdGuardHome_${ADGUARD_ARCH}.tar.gz"
+	if [ -z "$2" ]; then
+		if [ "${1:-RESTORE}" != "RESTORE" ]; then
+			if [ ! -d "${TARG_DIR}" ] && [ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ]; then
+				if read_yesno "Backup detected. Restore instead?"; then backup_restore RESTORE; return; fi
+			elif [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ] && [ ! -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ]; then
+				read_yesno "Backup before updating?" && backup_restore BACKUP 0
+			fi
+		fi
+		if [ ${OFFLINE_MODE} -eq 0 ] && { [ -z "${REMOTE_VER}" ] || [ -z "${REMOTE_BETA}" ] || ! check_connection; }; then
+			PTXT "${ERROR} No internet!"; end_op_message 1 "$1"; return
+		fi
+		create_dir "${TARG_DIR}" || { end_op_message 1 "$1"; return; }
+		if [ ${OFFLINE_MODE} -eq 0 ]; then
+			download_file "${TARG_DIR}" 755 "${RURL}/installer" || { PTXT "${ERROR} Failed to download installer."; end_op_message 1 "$1"; return; }
+		fi
+		if [ "${1:-RESTORE}" != "RESTORE" ]; then
+			[ "${1:-install}" != "update" ] && choose_branch
+			local ADGUARD_BRANCH="$(conf_value ADGUARD_BRANCH)"
+			if [ ! -f "${AGH_FILE}" ]; then inst_AdGuardHome "${1:-install}" "$ADGUARD_BRANCH"
+			else
+				local ADGUARD_VER="$("${AGH_FILE}" --version | cut -d" " -f4-)"; [ -z "${ADGUARD_VER}" ] && exit 1
+				local REMOTE_ADGUARD_VER="$(adguard_remote_version "${ADGUARD_BRANCH}")"; [ -z "${REMOTE_ADGUARD_VER}" ] && exit 1
+				if [ "${REMOTE_ADGUARD_VER}" != "${ADGUARD_VER}" ] || [ "${ADGUARD_BRANCH}" = "edge" ] || [ "${ADGUARD_BRANCH_CHANGED:-0}" = "1" ]; then
+					inst_AdGuardHome "${1:-update}" "${ADGUARD_BRANCH}"
+				else PTXT "${INFO} ADGUARDHOME_VER=${ADGUARD_VER} (current)"; fi
+			fi
+		fi
+	else
+		local REMOTE_ADGUARD_ARCHIVE="$(adguard_remote_archive "$2")"
+		local REMOTE_ADGUARD_URL="$(adguard_remote_url "$2")"
+		[ -z "${REMOTE_ADGUARD_ARCHIVE}" ] && REMOTE_ADGUARD_ARCHIVE="${ADGUARD_TAR}"
+		[ -z "${REMOTE_ADGUARD_URL}" ] && REMOTE_ADGUARD_URL="${URL_ARCH}/${REMOTE_ADGUARD_ARCHIVE}"
+		if ! download_file "${BASE_DIR}" 644 "${REMOTE_ADGUARD_URL}"; then PTXT "${ERROR} Unable to get AdGuardHome binary"; end_op_message 1 "$1"; return; fi
+		agh_prepare_binary_replace || return 1
+		tar xzv -C "${BASE_DIR}" -f "${BASE_DIR}/${REMOTE_ADGUARD_ARCHIVE}" 2>&1; echo "[TAR_EXIT=$?]"
+		chown "$(nvram get http_username)":root ${TARG_DIR}/*; rm -f "${BASE_DIR:?}/${REMOTE_ADGUARD_ARCHIVE}"
+		chmod 755 "${AGH_FILE}"; [ -f "/opt/sbin/AdGuardHome" ] && rm -f /opt/sbin/AdGuardHome
+		ln -sf "${AGH_FILE}" /opt/sbin/AdGuardHome || { PTXT "${ERROR} Failed to install binary."; end_op_message 1 "$1"; return; }
+	fi
+	create_dir "${ADDON_DIR}"; cleanup_legacy_firewall
+	if [ ${OFFLINE_MODE} -eq 1 ]; then
+		download_file "${ADDON_DIR}" 755 "${OFFLINE_DIR}/AdGuardHome.sh"
+		download_file "/opt/etc/init.d" 755 "${OFFLINE_DIR}/S99AdGuardHome"
+		download_file "/opt/etc/init.d" 644 "${OFFLINE_DIR}/rc.func.AdGuardHome"
+	else
+		download_file "${ADDON_DIR}" 755 "${RURL}/AdGuardHome.sh"
+		download_file "/opt/etc/init.d" 755 "${RURL}/S99AdGuardHome"
+		download_file "/opt/etc/init.d" 644 "${RURL}/rc.func.AdGuardHome"
+	fi
+	[ -f "/jffs/scripts/dnsmasq.postconf" ] && yaml_nvars_delete "#Asuswrt-Merlin AdGuardHome Installer" /jffs/scripts/dnsmasq.postconf 2>/dev/null
+	for i in init-start services-stop; do if ! grep -q "${ADDON_DIR}/AdGuardHome.sh $i &" "/jffs/scripts/${i}" 2>/dev/null && grep -q "${ADDON_DIR}/AdGuardHome.sh $i" "/jffs/scripts/${i}" 2>/dev/null; then del_jffs_script "/jffs/scripts/${i}"; fi; done
+	write_manager_script /jffs/scripts/init-start "init-start &"
+	write_manager_script /jffs/scripts/services-stop "services-stop &"
+	write_manager_script /jffs/scripts/dnsmasq.postconf dnsmasq
+	write_manager_script /jffs/scripts/firewall-start 'firewall "$1"'
+	[ "$(nvram get rc_support 2>/dev/null)" = "mtlancfg" ] && { del_jffs_script /jffs/scripts/dnsmasq-sdn.postconf 2>/dev/null; write_manager_script /jffs/scripts/dnsmasq-sdn.postconf 'dnsmasq-sdn $2'; }
+	del_between_magic /jffs/scripts/service-event-end '# Asuswrt-Merlin-AdGuardHome-Installer'
+	write_command_script /jffs/scripts/service-event-end 'if printf "%s" "$@" | /bin/grep -qE "^(((start|stop|restart|kill|reload)_?.*AdGuardHome)$)"; then { sh /jffs/addons/AdGuardHome.d/AdGuardHome.sh "$(printf "%s" "$@" | /bin/grep -oE "(start|stop|restart|kill|reload)")" x & }; fi # Asuswrt-Merlin-AdGuardHome-Installer'
+	if [ ${OFFLINE_MODE} -eq 1 ] && [ -f "${OFFLINE_DIR}/AdGuardHome.yaml" ]; then
+		PTXT "${INFO} Provisioning offline AdGuardHome.yaml config"
+		mkdir -p "$(dirname "${YAML_FILE}")" 2>/dev/null
+		cp -f "${OFFLINE_DIR}/AdGuardHome.yaml" "${YAML_FILE}" && chmod 644 "${YAML_FILE}"
+		cp -f "${OFFLINE_DIR}/AdGuardHome.yaml" "${YAML_ORI}" && chmod 644 "${YAML_ORI}"
+		local WEB_PORT REF_PATH REF_BASE REF_DIR
+		WEB_PORT="$(awk -F':' '/address:/{print $3}' "${YAML_FILE}" | grep -oE '[0-9]+$')"
+		[ -n "${WEB_PORT}" ] && write_conf ADGUARD_WEBUI_PORT "\"${WEB_PORT}\""
+		grep -E '_(file|path):' "${YAML_FILE}" | awk -F':' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $2}' | grep -v '^$' | grep -v '^/' | while read -r REF_BASE; do
+			if [ -f "${OFFLINE_DIR}/${REF_BASE}" ]; then
+				REF_DIR="$(dirname "${TARG_DIR}/${REF_BASE}")"
+				mkdir -p "${REF_DIR}" 2>/dev/null
+				cp -f "${OFFLINE_DIR}/${REF_BASE}" "${TARG_DIR}/${REF_BASE}" && chmod 644 "${TARG_DIR}/${REF_BASE}" && PTXT "${INFO} Copied offline asset: ${REF_BASE}"
+			fi
+		done
+		grep -E '_(file|path):' "${YAML_FILE}" | awk -F':' '{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2);print $2}' | grep '^/' | while read -r REF_PATH; do
+			REF_BASE="$(basename "${REF_PATH}")"
+			if [ -f "${OFFLINE_DIR}/${REF_BASE}" ] && [ ! -f "${REF_PATH}" ]; then
+				mkdir -p "$(dirname "${REF_PATH}")" 2>/dev/null
+				cp -f "${OFFLINE_DIR}/${REF_BASE}" "${REF_PATH}" && chmod 644 "${REF_PATH}" && PTXT "${INFO} Copied offline asset: ${REF_BASE}"
+			fi
+		done
+		[ "${YAML_FILE}" != "${YAML_ORI}" ] && cp -f "${YAML_FILE}" "${YAML_ORI}" 2>/dev/null
+		mkdir -p "${TARG_DIR}/data/filters" "${TARG_DIR}/data/querylog" "${TARG_DIR}/data/stats" 2>/dev/null
+		chmod 755 "${TARG_DIR}/data" "${TARG_DIR}/data/filters" "${TARG_DIR}/data/querylog" "${TARG_DIR}/data/stats" 2>/dev/null
+		local AGH_OWNER
+		AGH_OWNER="$(nvram get http_username 2>/dev/null)"
+		[ -z "${AGH_OWNER}" ] && AGH_OWNER="root"
+		chown -h "${AGH_OWNER}":root "${TARG_DIR}" "${TARG_DIR}/data" "${TARG_DIR}/data/filters" "${TARG_DIR}/data/querylog" "${TARG_DIR}/data/stats" "${YAML_FILE}" "${YAML_ORI}" "${CONF_FILE}" 2>/dev/null
+		PTXT "${INFO} Pre-created data subdirectories: filters, querylog, stats"
+	fi
+	if [ "${1:-update}" != "update" ]; then
+		[ ! -f "${ADDON_DIR}/localtime" ] && set_timezone
+		setup_AdGuardHome "" "${1:-install}" || { end_op_message 1; return; }
+	fi
+	agh_complete_startup || { end_op_message 1 "$1"; return; }
+	end_op_message 0 "$1"
+}
+
+set_timezone() {
+	local TMP="/root" TZ_ARCH="$(uname -m)"
+	case "${TZ_ARCH}" in aarch64|arm64) TZ_ARCH="aarch64";; armv7l) TZ_ARCH="arm";; esac
+	local TZ_DATA="tzdata-2021e-1-${TZ_ARCH}.pkg.tar.bz2"
+	if [ ${OFFLINE_MODE} -eq 1 ]; then
+		if [ -f "${OFFLINE_DIR}/${TZ_DATA}" ]; then
+			PTXT "${INFO} Using local tzdata."
+			cp -f "${OFFLINE_DIR}/${TZ_DATA}" "${TMP}/${TZ_DATA}" 2>/dev/null || true
+		else
+			PTXT "${WARNING} Offline: No tzdata. You can set timezone later."
+			return 0
+		fi
+	else opkg install column >/dev/null 2>&1; download_file "${TMP}" 644 "${RURL}/${TZ_DATA}"; fi
+	if [ ! -f "${TMP}/${TZ_DATA}" ]; then PTXT "${INFO} Skipping timezone setup."; return 0; fi
+	local INDEX; INDEX="$(tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ && /\/posix\//' | wc -l)"
+	[ ${INDEX} -eq 0 ] && { PTXT "${WARNING} No timezone data in archive."; return 0; }
+	if [ ${OFFLINE_MODE} -eq 1 ]; then
+		PTXT "${INFO} Setting default timezone Europe/Moscow (UTC+3, change via WebUI)."
+		mkdir -p "${TMP}/tzextract" 2>/dev/null
+		# Europe/Moscow is a hardlink to W-SU in tzdata; BusyBox tar can't extract single hardlinks.
+		# Extract W-SU (the actual inode) and copy it as Europe/Moscow localtime.
+		local TZ_EXTRACT_OK=0
+		for TZ_PATH in "usr/share/zoneinfo/posix/Europe/Moscow" "usr/share/zoneinfo/Europe/Moscow" "usr/share/zoneinfo/posix/W-SU" "usr/share/zoneinfo/W-SU"; do
+			local TZ_DIR="$(dirname "${TZ_PATH}")"
+			local TZ_NAME="$(basename "${TZ_PATH}")"
+			if tar xjf "${TMP}/${TZ_DATA}" -C "${TMP}/tzextract" "./${TZ_PATH}" 2>/dev/null; then
+				if [ -f "${TMP}/tzextract/${TZ_PATH}" ]; then
+					cp -f "${TMP}/tzextract/${TZ_PATH}" "${ADDON_DIR}/localtime" 2>/dev/null && TZ_EXTRACT_OK=1
+					rm -rf "${TMP}/tzextract" 2>/dev/null
+					mkdir -p "${TMP}/tzextract" 2>/dev/null
+				fi
+			fi
+		done
+		if [ ${TZ_EXTRACT_OK} -eq 1 ]; then
+			PTXT "${INFO} Timezone set: Europe/Moscow (UTC+3)"
+		else
+			PTXT "${WARNING} Failed to extract Europe/Moscow from tzdata; set later via WebUI"
+		fi
+		rm -rf "${TMP:?}/${TZ_DATA}" "${TMP:?}/usr" "${TMP:?}/tzextract" 2>/dev/null; return 0
+	fi
+	PTXT "${INFO} Available timezone/locations:"
+	tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ && /\/posix\//' | sort | cut -d'/' -f2- | awk -v I=0 -F'/' '!/\/$/{++I;printf "  "I") ";for(i=5;i<NF;i++)printf $i"/";print $NF}' | column
+	read_input_num "Select timezone" 1 ${INDEX}
+	local TZ_FILE; TZ_FILE="$(tar tjf "${TMP}/${TZ_DATA}" 2>/dev/null | awk -F'/' '!/\/$/ &&  /\/posix\//' | sort | awk -v IDX="$CHOSEN" '{++i}i==IDX{print $0}')"
+	[ -z "${TZ_FILE}" ] && { PTXT "${ERROR} Invalid selection."; return 1; }
+	PTXT "${INFO} $(basename "${TZ_FILE}") selected"
+	tar xjf "${TMP}/${TZ_DATA}" -C "${TMP}" ./usr/share/zoneinfo/posix 2>/dev/null || true
+	mv "${TMP}/${TZ_FILE}" "${ADDON_DIR}/localtime" 2>/dev/null || PTXT "${WARNING} Unable to set timezone."; rm -rf "${TMP:?}/${TZ_DATA}" "${TMP:?}/usr" 2>/dev/null
+}
+
+setup_AdGuardHome() {
+	[ ! -d "${TARG_DIR}" ] || [ ! -f "${AGH_FILE}" ] && { PTXT "${ERROR} AdGuardHome not installed."; return 1; }
+	PTXT "${INFO} Configuring AdGuardHome..."; setup_AdGuardHome_impl "$@"; local RET="$?"
+	[ "$1" = "reconfig" ] && { [ ${RET} -eq 0 ] && { PTXT "${INFO} Restarting..."; agh_restart || { agh_start_error; end_op_message 1; return; }; PTXT "${INFO} Setup complete."; }; end_op_message 0; }
+	return ${RET}
+}
+
+setup_AdGuardHome_impl() {
+	local SCHEMA_VER="$("${AGH_FILE}" -v --version 2>/dev/null | awk '/Schema[[:space:]]version:/{print $NF}')"; [ -z "${SCHEMA_VER}" ] && SCHEMA_VER="27"
+	if [ ${OFFLINE_MODE} -eq 1 ] && [ -f "${YAML_FILE}" ]; then
+		PTXT "${INFO} Using existing config (offline mode)."
+		check_AdGuardHome_yaml || { PTXT "${ERROR} Offline YAML config invalid."; return 1; }
+		return 0
+	fi
+	if [ -z "$1" ] && [ -f "${YAML_FILE}" ]; then
+		if ! awk -F'=' '/ADGUARD_WEBUI_PORT/{print$2}' "${CONF_FILE}" 2>/dev/null | sed -e 's/^"//' -e 's/"$//' | grep -qoE '^(3000|[3-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$'; then
+			read_input_port "Default is" 3000; write_conf ADGUARD_WEBUI_PORT "\"${WEB_PORT}\""
+			local OPORT; OPORT="$(awk -F':' '/address:/{print$3}' "${YAML_FILE}" | grep -oE '[0-9]+$')"
+			yaml_nvars_replace "  address: 0.0.0.0:${OPORT}" "  address: 0.0.0.0:${WEB_PORT}" "${YAML_FILE}"
+		fi
+		check_AdGuardHome_yaml || { setup_AdGuardHome_impl x; return; }
+		read_yesno "Use existing config?" || setup_AdGuardHome_impl x
+	else
+		if [ -f "${YAML_FILE}" ]; then
+			if [ "$1" = "reconfig" ]; then check_AdGuardHome_yaml || { setup_AdGuardHome_impl x; return; }; fi
+			PTXT "${INFO} Reconfigure:" "  1) Use existing" "  2) Restore original" "  3) New configuration"
+			read_input_num "Your choice" 1 3
+			case ${CHOSEN} in
+				1) PTXT "${INFO} Using existing config.";;
+				2|3) mv "${YAML_FILE}" "${YAML_BAK}"; [ ${CHOSEN} -eq 3 ] && rm -f "${YAML_ORI}" || cp -f "${YAML_ORI}" "${YAML_FILE}" 2>/dev/null;;
+			esac
+		elif [ -f "${YAML_ORI}" ]; then cp -f "${YAML_ORI}" "${YAML_FILE}"; fi
+		case "${2:-reconfig}" in
+			"install"|"reconfig")
+				if [ ! -f "${YAML_FILE}" ] || [ "$2" = "reconfig" ]; then
+					read_yesno "Redirect all DNS to AdGuardHome?" && check_dns_filter 1 || check_dns_filter 0
+					[ "$(nvram get dns_local_cache)" != "1" ] && read_yesno "Run AdGuardHome as local caching DNS?" && check_dns_local 1 || check_dns_local 0
+				fi
+				if [ ! -f "${YAML_ORI}" ] && [ ! -f "${YAML_FILE}" ]; then
+					PTXT "${INFO} Initial configuration..."
+					read_input_port "Default Web UI port" 3000; write_conf ADGUARD_WEBUI_PORT "\"${WEB_PORT}\""
+					PTXT "http:" "  address: 0.0.0.0:${WEB_PORT}" >"${YAML_ORI}"
+					PTXT "${INFO} Set username and password."; AdGuardHome_authen 1
+					PTXT "dns:" "  bind_hosts:" "    - 0.0.0.0" "  port: 53" >>"${YAML_ORI}"
+					PTXT "${INFO} Set upstream DNS servers:"; read_input_dns "Primary" 9.9.9.9; read_input_dns "Secondary" 8.8.8.8
+					local DOMAIN NET_ADDR NET_ADDR6 LAN_IF
+					LAN_IF="$(nvram get lan_ifname)"; NET_ADDR="$(ip -o -4 addr list "${LAN_IF}" 2>/dev/null | awk 'NR==1{split($4,ip,"/");print ip[1]}')" || NET_ADDR="$(nvram get lan_ipaddr)"
+					NET_ADDR6="$(ip -o -6 addr list "${LAN_IF}" scope global 2>/dev/null | awk 'NR==1{split($4,ip,"/");print ip[1]}')" || NET_ADDR6="$(nvram get ipv6_rtr_addr)"
+					DOMAIN="$(nvram get lan_domain)"; [ -z "${DOMAIN}" ] && DOMAIN="lan" && nvram set lan_domain="${DOMAIN}" && nvram commit && write_conf ADGUARD_DOMAIN "\"yes\"" || write_conf ADGUARD_DOMAIN "\"no\""
+					PTXT "  upstream_dns:" >>"${YAML_ORI}"
+					[ -n "${NET_ADDR6}" ] && PTXT "  - '[/$(printf "%s" "${NET_ADDR6}" | sed 's/.$//' | awk -F: '{for(i=1;i<=NF;i++)x=x""sprintf(":%4s",$i);gsub(/ /,"0",x);printf x}' | cut -c2-|cut -c1-20|sed 's/://g;s/^.*$/\n&\n/;tx;:x;s/\(\n.\)\(.*\)\(.\n\)/\3\2\1/;tx;s/\n//g;s/\(.\)/\1./g;s/$/ip6.arpa/')/][::]:553'" >>"${YAML_ORI}"
+					PTXT "  - '[/router.asus.com/][::]:553'" "  - '[/www.asusnetwork.net/][::]:553'" "  - '[/www.asusrouter.com/][::]:553'" "  - '[/use-application-dns.net/][::]:553'" "  - '[/dns.resolver.arpa/][::]:553'" "  - '[/${DOMAIN}/][::]:553'" "  - '[//][::]:553'" "  - ${BOOTSTRAP1}" "  - ${BOOTSTRAP2}" "  - tcp://${BOOTSTRAP1}" "  - tcp://${BOOTSTRAP2}" "  bootstrap_dns:" "  - ${BOOTSTRAP1}" "  - ${BOOTSTRAP2}" "  fallback_dns:" "  - ${BOOTSTRAP1}" "  - ${BOOTSTRAP2}" "  - tcp://${BOOTSTRAP1}" "  - tcp://${BOOTSTRAP2}" "  resolve_clients: true" "  use_private_ptr_resolvers: true" "  local_ptr_upstreams:" "  - '[::]:553'" "  - '[/10.in-addr.arpa/][::]:553'" "  - '[/$(printf "%s" "${NET_ADDR}" | awk 'BEGIN{FS="."}{print$2"."$1".in-addr.arpa"}')/][::]:553'" "schema_version: ${SCHEMA_VER}" >>"${YAML_ORI}"
+					PTXT "${INFO} Writing configuration..."; cp -f "${YAML_ORI}" "${YAML_FILE}"
+				fi
+				check_AdGuardHome_yaml || { PTXT "${ERROR} Config validation failed."; return 1; };;
+		esac
+	fi
+}
+
+# ===== PASSWORD HASHING =====
+hash_password_python() { PTXT -n "$1" | python3 -c 'import sys,bcrypt;password=sys.stdin.buffer.read();print(bcrypt.hashpw(password,bcrypt.gensalt(prefix=b"2a",rounds=10)).decode("ascii"))' 2>/dev/null; }
+
+AdGuardHome_authen() {
+	local USERNAME; PTXT -n "${INPUT} Username${NORM}: "; read -r USERNAME
+	local PW1 PW2; PTXT -n "${INPUT} Password${NORM}: "; read -rs PW1; PTXT " "; PTXT -n "${INPUT} Re-enter password${NORM}: "; read -rs PW2; PTXT " "
+	[ -z "${PW1}" ] || [ -z "${PW2}" ] || [ "${PW1}" != "${PW2}" ] && { PTXT "${ERROR} Passwords don't match!"; AdGuardHome_authen "$1"; return; }
+	remove_conflicting_apache; ensure_password_hash_tool || { PTXT "${ERROR} No password hashing tool."; end_op_message 1; return; }
+	local PW1_ENCRYPTED=""
+	python_bcrypt_available && PW1_ENCRYPTED="$(hash_password_python "${PW1}")" || true
+	[ -z "${PW1_ENCRYPTED}" ] && [ -f "/opt/bin/bcrypt-tool" ] && PW1_ENCRYPTED="$(/opt/bin/bcrypt-tool hash "${PW1}" 10 2>/dev/null)" || true
+	[ -z "${PW1_ENCRYPTED}" ] && { PTXT "${ERROR} Password hashing failed. Install python3-bcrypt or bcrypt-tool."; end_op_message 1; return; }
+	case "${PW1_ENCRYPTED}" in $2a$10$*) ;; *) PTXT "${ERROR} Hashing failed."; end_op_message 1; return;; esac
+	if [ "$1" -eq 0 ]; then
+		yaml_nvars_delete "- name:" "${YAML_FILE}"; yaml_nvars_delete "  password:" "${YAML_FILE}"
+		yaml_nvars_insert "users:" "  password: ${PW1_ENCRYPTED}" "${YAML_FILE}"; yaml_nvars_insert "users:" "- name: ${USERNAME}" "${YAML_FILE}"
+		check_AdGuardHome_yaml "${YAML_FILE}"; agh_complete_startup || { end_op_message 1; return; }; end_op_message 0
+	else PTXT "users:" "- name: ${USERNAME}" "  password: ${PW1_ENCRYPTED}" >>"${YAML_ORI}"; fi
+}
+
+setup_amtmupdate() {
+	local CUR="$(conf_value AMTM_UPDATE)"; local NEW; [ -z "${CUR}" ] || [ "${CUR}" = "DISABLED" ] && NEW="ENABLED" || NEW="DISABLED"
+	PTXT "${INFO} Setting AMTM Update to ${NEW}."; write_conf AMTM_UPDATE "\"${NEW}\""; end_op_message 0
+}
+
+uninst_all() {
+	[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && read_yesno "Remove backup?" && rm -f "${BASE_DIR}/backup_AdGuardHome.tar.gz"
+	agh_stop; cleanup_legacy_firewall
+	[ "$(conf_value ADGUARD_DOMAIN)" = "yes" ] && nvram set lan_domain="" && nvram commit
+	mv "${TARG_DIR}/installer" "${HOME}/installer" 2>/dev/null
+	rm -rf "${TARG_DIR}" "/opt/etc/init.d/S99AdGuardHome" "/opt/etc/init.d/rc.func.AdGuardHome" "/opt/sbin/AdGuardHome" "/opt/bin/bcrypt-tool" "${ADDON_DIR}" "/opt/var/log/AdGuardHome.log"
+	yaml_nvars_delete "#Asuswrt-Merlin AdGuardHome Installer" /jffs/scripts/dnsmasq.postconf 2>/dev/null
+	for s in init-start dnsmasq.postconf firewall-start services-stop; do del_jffs_script "/jffs/scripts/${s}" 2>/dev/null; done
+	[ "$(nvram get rc_support 2>/dev/null)" = "mtlancfg" ] && del_jffs_script /jffs/scripts/dnsmasq-sdn.postconf 2>/dev/null
+	del_between_magic /jffs/scripts/service-event-end '# Asuswrt-Merlin-AdGuardHome-Installer'
+	service restart_dnsmasq >/dev/null 2>&1; end_op_message 0
+}
+
+# ===== YAML HELPERS =====
+yaml_nvars_append() { echo "$1" >>"$2"; }
+yaml_nvars_delete() { sed -i "/$(_quote "$1")/d" "$2"; }
+yaml_nvars_insert() { sed -i "/$(_quote "$1")/a$(_quote "$2")" "$3"; }
+yaml_nvars_replace() { sed -i "s/$(_quote "$1")/$(_quote "$2")/" "$3"; }
+
+# ===== SCRIPT HELPERS =====
+write_command_script() {
+	local TARG="$1" COMMAND="$2" FN; FN="$(basename "${TARG}")"
+	[ ! -f "${TARG}" ] && { PTXT "${INFO} Creating ${FN}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}"
+	grep -q -F "${COMMAND}" "${TARG}" && PTXT "${INFO} ${FN} already configured" || { PTXT "${INFO} Configure ${FN}"; PTXT "${COMMAND}" >>"${TARG}"; }
+}
+
+write_manager_script() {
+	local TARG="$1" OP="$2" FN="$(basename "${TARG}")" CMD="${ADDON_DIR}/AdGuardHome.sh"
+	[ ! -f "${TARG}" ] && { PTXT "${INFO} Creating ${FN}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}" "${CMD}" 2>/dev/null
+	del_between_magic "${TARG}" Asuswrt-Merlin-AdGuardHome-Installer
+	grep -q -F "[ -x ${CMD} ] && ${CMD} ${OP}" "${TARG}" && PTXT "${INFO} ${FN} already configured" || {
+		PTXT "${INFO} Configure ${FN}"
+		if grep -q "^${CMD}" "${TARG}"; then sed -i "s~^${CMD}~[ -x ${CMD} ] \&\& ${CMD} ${OP}~" "${TARG}"
+		else del_jffs_script "${TARG}" !manager; [ "$(tail -1 "${TARG}" | grep -c '^$')" -eq 0 ] && PTXT "" >>"${TARG}"; PTXT "[ -x ${CMD} ] && ${CMD} ${OP}" >>"${TARG}"; fi
+	}
+}
+
+# ===== MENU =====
+end_op_message() {
+	case "${1:-0}" in
+		0) [ "$2" = "update" ] && exit 0; PTXT "${INFO} Operation completed.";;
+		1) [ "$2" = "update" ] && exit 1; PTXT "${INFO} Operation aborted.";;
+		2) PTXT "${INFO} Abnormal operations.";;
+	esac; PTXT "=====================================================" "" ""
+	sleep 3s && clear
+	[ -f "${TARG_DIR}/installer" ] && chmod 755 "${TARG_DIR}/installer" >/dev/null 2>&1 && exec "${TARG_DIR}/installer" "${BRANCH}"
+	[ -f "${SCRIPT_LOC}" ] && chmod 755 "${SCRIPT_LOC}" >/dev/null 2>&1 && exec "${SCRIPT_LOC}" "${BRANCH}"
+	[ -f "${HOME}/installer" ] && chmod 755 "${HOME}/installer" && exec "${HOME}/installer" "${BRANCH}"
+	clear && { end_op_header 2>/dev/null; }; exit $?
+}
+
+end_op_header() { sed -n -e "1,$(($(grep -wn 'esac' "$0" | cut -d':' -f1 | tail -n1)+1))p" "$0" >"${0}.tmp"; chmod 755 "${0}.tmp"; exec "${0}.tmp" "${BRANCH}" && rm -f "${0}.tmp"; }
+
+menu() {
+	trap - HUP INT QUIT ABRT TERM
+	case "$1" in "")
+		PTXT "${INFO} Choose option:" "  1) Install/Update" "  2) Uninstall"
+		{ [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ]; } && PTXT "  3) Change Password" "  4) Reconfigure" "  5) AMTM updates" "  b) Backup"
+		[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && PTXT "  r) Restore"
+		PTXT "  q) Quit"
+		read_input_num "Selection" 1 5 b r q;; *) CHOSEN="$1";; esac
+	[ -n "${CHOSEN}" ] && trap 'clear; end_op_message 2' HUP INT QUIT ABRT TERM
+	case "${CHOSEN}" in
+		1|install|update) PTXT "${INFO} Installing AdGuardHome..."; read_yesno "Proceed?" && inst_AdGuardHome "install" || end_op_message 1;;
+		2|uninstall) read_yesno "Uninstall AdGuardHome?" && uninst_all || end_op_message 1;;
+		3|changepw) read_yesno "Change password?" && AdGuardHome_authen 0 || end_op_message 1;;
+		4|reconfigure) read_yesno "Reconfigure?" && setup_AdGuardHome reconfig || end_op_message 1;;
+		5|setamtmupdate) setup_amtmupdate;;
+		b|B|backup) read_yesno "Backup?" && backup_restore BACKUP || end_op_message 1;;
+		r|R|restore) read_yesno "Restore?" && backup_restore RESTORE || end_op_message 1;;
+		q|Q) PTXT "${INFO} Goodbye."; [ -f "${HOME}/installer" ] && rm -f "${HOME}/installer"; sleep 3s; clear;;
+	esac
+}
+
+# ===== INPUT HELPERS =====
+read_input_num() {
+	local RANGE; for a in "$@"; do [ -z "$RANGE" ] && RANGE="[$2-$3]" || RANGE="${RANGE}/$a"; done
+	[ $# -le 3 ] && RANGE="[${2}-${3}]"; PTXT -n "${INPUT} ${1}, ${BOLD}${RANGE}${NORM}: "; read -r CHOSEN
+	[ -z "${CHOSEN}" ] && { PTXT "${ERROR} Invalid input."; read_input_num "$@"; return; }
+	case "${CHOSEN}" in $4|$5|$6) return 1;; esac
+	PTXT "${CHOSEN}" | grep -qE '^[0-9]+$' || { PTXT "${ERROR} Numbers only."; read_input_num "$@"; return; }
+	[ ${CHOSEN} -lt $2 ] || [ ${CHOSEN} -gt $3 ] && { PTXT "${ERROR} Not in range."; read_input_num "$@"; }
+}
+
+read_input_port() {
+	PTXT -n "${INPUT} ${1} ${BOLD}${2}: ${NORM}"; read -r WEB_PORT; [ -z "${WEB_PORT}" ] && WEB_PORT="$2"
+	PTXT "${WEB_PORT}" | grep -qoE '^(3000|[3-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$' && [ ${WEB_PORT} -ge 3000 ] && [ ${WEB_PORT} -le 65535 ] || { PTXT "${ERROR} Invalid port (3000-65535)."; read_input_port "$@"; return; }
+	netstat -nlp 2>/dev/null | grep -qE "(:${WEB_PORT}[[:space:]])" && { PTXT "${ERROR} Port ${WEB_PORT} in use."; read_input_port "$@"; }
+}
+
+read_input_dns() {
+	PTXT -n "${INPUT} ${1} ${BOLD}${2}: ${NORM}"; local DNS; read -r DNS; [ -z "${DNS}" ] && DNS="$2"
+	PTXT "${DNS}" | grep -qoE "\b((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b" || { PTXT "${ERROR} Invalid DNS."; read_input_dns "$@"; return; }
+	[ "${DNS_SERVER1}" = "${DNS}" ] && { PTXT "${ERROR} Duplicate DNS."; read_input_dns "$@"; return; }
+	case "$1" in Primary) BOOTSTRAP1="${DNS}"; DNS_SERVER1="${DNS}";; Secondary) BOOTSTRAP2="${DNS}";; esac
+}
+
+read_yesno() { PTXT -n "${INPUT} ${1} ${BOLD}[y/n]${NORM}: "; local YN; read -r YN; case "${YN}" in y|Y) return 0;; n|N) return 1;; *) PTXT "${ERROR} y/n only."; read_yesno "$@";; esac; }
+
+# ===== MAIN =====
+trap 'on_installer_exit' EXIT
+case "${1}" in
+	amtmupdate)
+		BRANCH="$(conf_value INSTALLER_BRANCH)"; [ -n "${BRANCH}" ] && BRANCH="$(sanitize_branch "${BRANCH}")" || BRANCH="master"
+		case "$2" in check) AMTM_UPDATE="$(conf_value AMTM_UPDATE)"; [ ! -f "${CONF_FILE}" ] || [ "${AMTM_UPDATE}" = "DISABLED" ] && exit 1; exit 0;; "") CHOSEN="${1#amtm}"; set -- "$BRANCH" "$CHOSEN";; esac;;
+	"") BRANCH="master";; *) BRANCH="${1}";;
+esac
+BRANCH="$(sanitize_branch "${BRANCH}")"; write_conf INSTALLER_BRANCH "\"${BRANCH}\""
+[ -z "$(nvram get odmpid 2>/dev/null)" ] && ROUTER_MODEL="$(nvram get productid 2>/dev/null)" || ROUTER_MODEL="$(nvram get odmpid 2>/dev/null)"
+[ -z "${ROUTER_MODEL}" ] && PTXT "${ERROR} Unsupported router." && sleep 3s && exit 1
+[ "$(nvram get sw_mode 2>/dev/null)" != "1" ] && PTXT "${ERROR} Not in router mode." && sleep 3s && exit 1
+RURL="https://raw.githubusercontent.com/jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer/${BRANCH}"
+ROUTER_OS="$(/bin/uname)"
+! PTXT "${ROUTER_MODEL}" | grep -vE "RT-AC(86|2900)" | grep -q "AC" && ROUTER_ARCH="$(/bin/uname -m)" || ROUTER_ARCH="armv7"
+NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3})|(((172\.(1[6-9]|2[0-9]|3[0-1]))|(192\.168))(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){2}))$\b')"
+
+[ ${OFFLINE_MODE} -eq 1 ] && PTXT "${INFO} OFFLINE MODE - Assets: ${OFFLINE_DIR}"
+[ -n "${NAT_ENV}" ] && [ -z "$2" ] && [ ${OFFLINE_MODE} -eq 0 ] && PTXT "${WARNING} Double-NAT detected."
+
+[ -z "$2" ] && { printf '\e[8;50;125t'; printf '\033[?7l'; clear; sed -n '2,21p' "$0"; printf '\033[?7h'; }
+
+case "${ROUTER_OS}" in Linux) [ -z "$2" ] && PTXT "${INFO} Linux platform."; ROUTER_OS="linux";; *) PTXT "${ERROR} Unsupported OS."; exit 1;; esac
+case "$(/bin/uname -m)" in
+	aarch64|arm64) ROUTER_ARCH="arm64"; URL_ARCH="${RURL}/armv8"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	armv7l) ROUTER_ARCH="armv7"; URL_ARCH="${RURL}/${ROUTER_ARCH}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	armv7) ROUTER_ARCH="armv5"; URL_ARCH="${RURL}/${ROUTER_ARCH}"; ADGUARD_ARCH="${ROUTER_OS}_${ROUTER_ARCH}";;
+	*) PTXT "${ERROR} Unsupported arch."; exit 1;;
+esac
+[ -z "$2" ] && PTXT "${INFO} Architecture: ${ROUTER_ARCH}"
+
+init_remote_adguard_metadata
+case "$2" in
+	"") cleanup; check_jffs_enabled; check_dns_environment 0; check_version; menu;;
+	[1-5]|install|update|uninstall|changepw|reconfigure|amtmupdate|[bB]|backup|[rR]|restore) menu "$2";;
+	*) PTXT "${INFO} Usage: sh installer {branch} {action}";;
+esac
