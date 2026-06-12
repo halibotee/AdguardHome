@@ -4,7 +4,7 @@
 
 基于 [jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer](https://github.com/jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer)（MIT 协议）修改优化。
 
-## 一键安装
+## 一键脚本
 
 ```sh
 curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/installer && sh installer; rm installer
