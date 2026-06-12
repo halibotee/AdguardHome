@@ -1,6 +1,4 @@
-# Build / runtime artifacts
-*.tar.gz
-*.pkg.tar.bz2
+# Runtime artifacts
 *.pid
 
 # macOS
@@ -15,4 +13,3 @@
 *.swp
 *.swo
 *~
-.DS_Store
