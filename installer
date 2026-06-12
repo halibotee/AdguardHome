@@ -513,8 +513,8 @@ uninst_all() {
 # --- Write helpers ---
 write_command_script() {
 	local TARG="$1" COMMAND="$2" FN; FN="$(basename "${TARG}")"
-	[ ! -f "${TARG}" ] && { PTXT "Creating ${FN}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}"
-	grep -q -F "${COMMAND}" "${TARG}" && PTXT "${FN} already configured" || { PTXT "Configure ${FN}"; PTXT "${COMMAND}" >>"${TARG}"; }
+	[ ! -f "${TARG}" ] && { PTXT "Creating ${TARG}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}"
+	grep -q -F "${COMMAND}" "${TARG}" && PTXT "${TARG} already configured" || { PTXT "Configure ${TARG}"; PTXT "${COMMAND}" >>"${TARG}"; }
 }
 
 write_conf() {
@@ -525,11 +525,11 @@ write_conf() {
 }
 
 write_manager_script() {
-	local TARG="$1" OP="$2" FN="$(basename "${TARG}")" CMD="${ADDON_DIR}/AdGuardHome.sh"
-	[ ! -f "${TARG}" ] && { PTXT "Creating ${FN}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}" "${CMD}" 2>/dev/null
+	local TARG="$1" OP="$2" CMD="${ADDON_DIR}/AdGuardHome.sh"
+	[ ! -f "${TARG}" ] && { PTXT "Creating ${TARG}"; PTXT "#!/bin/sh" >"${TARG}"; }; chmod 755 "${TARG}" "${CMD}" 2>/dev/null
 	del_between_magic "${TARG}" Asuswrt-Merlin-AdGuardHome-Installer
-	if [ "$(grep -c -F "[ -x ${CMD} ] && ${CMD} ${OP}" "${TARG}")" -gt 0 ]; then PTXT "${FN} already configured"
-	else PTXT "Configure ${FN}"; del_jffs_script "${TARG}" !manager; [ "$(tail -1 "${TARG}" | grep -c '^$')" -eq 0 ] && PTXT "" >>"${TARG}"; PTXT "[ -x ${CMD} ] && ${CMD} ${OP}" >>"${TARG}"; fi
+	if [ "$(grep -c -F "[ -x ${CMD} ] && ${CMD} ${OP}" "${TARG}")" -gt 0 ]; then PTXT "${TARG} already configured"
+	else PTXT "Configure ${TARG}"; del_jffs_script "${TARG}" !manager; [ "$(tail -1 "${TARG}" | grep -c '^$')" -eq 0 ] && PTXT "" >>"${TARG}"; PTXT "[ -x ${CMD} ] && ${CMD} ${OP}" >>"${TARG}"; fi
 }
 
 yaml_nvars_append() { echo "$1" >>"$2"; }
