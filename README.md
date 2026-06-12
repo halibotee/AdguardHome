@@ -25,6 +25,27 @@
 
 ## 快速开始
 
+### 一行命令 (推荐)
+
+```sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/halibotee/AdguardHome/main/install.sh)"
+```
+
+或者先下载到本地再执行:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/halibotee/AdguardHome/main/install.sh -o /tmp/install.sh
+sh /tmp/install.sh
+```
+
+`install.sh` 会:
+1. 检测架构 (aarch64 / armv7 / armv5)
+2. 检查 Entware + python3-bcrypt + column 是否预装
+3. 下载所有必需文件到 `/tmp/AdguardHome_setup/` (默认)
+4. 自动启动离线安装器
+
+### 手动方式
+
 如果你已经拿到了离线包 (例如 `/mnt/sda1/AdguardHome_setup/`), 直接 SSH 登录路由器:
 
 ```sh
