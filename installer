@@ -479,7 +479,7 @@ setup_AdGuardHome_impl() {
 					PTXT "http:" "  address: 0.0.0.0:${WEB_PORT}" >"${YAML_ORI}"
 					PTXT "Set username and password."; AdGuardHome_authen 1
 					PTXT "dns:" "  bind_hosts:" "    - 0.0.0.0" "  port: 53" >>"${YAML_ORI}"
-					PTXT "Set upstream DNS servers:"; read_input_dns "Primary" 9.9.9.9; read_input_dns "Secondary" 8.8.8.8
+					PTXT "Set upstream DNS servers:"; read_input_dns "Primary" 1.1.1.1; read_input_dns "Secondary" 8.8.8.8
 					local DOMAIN NET_ADDR NET_ADDR6 LAN_IF
 					LAN_IF="$(nvram get lan_ifname)"; NET_ADDR="$(ip -o -4 addr list "${LAN_IF}" | awk 'NR==1{split($4,ip,"/");print ip[1]}' 2>/dev/null || nvram get lan_ipaddr)"
 					NET_ADDR6="$(ip -o -6 addr list "${LAN_IF}" scope global | awk 'NR==1{split($4,ip,"/");print ip[1]}' 2>/dev/null || nvram get ipv6_rtr_addr)"
