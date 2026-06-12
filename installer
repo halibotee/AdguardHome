@@ -1,26 +1,12 @@
 #!/bin/sh
-#################################################################################################################
-# AdGuardHome Offline Installer v2.2.3-OFFLINE
-# Modified to support fully offline installation via AGH_OFFLINE_DIR
-#
-# Usage with offline assets:
-#   AGH_OFFLINE_DIR=/path/to/assets sh installer
-#
-# Prepare offline bundle (with network):
-#   sh prepare-offline.sh /path/to/offline-bundle
-#
-# Offline directory should contain:
-#   AdGuardHome_linux_{arch}.tar.gz  (from https://github.com/AdguardTeam/AdGuardHome/releases)
-#   AdGuardHome.sh                   (manager script)
-#   S99AdGuardHome                   (init script)
-#   rc.func.AdGuardHome              (library script)
-#   tzdata-*.pkg.tar.bz2             (optional, timezone data)
-#################################################################################################################
+######################################
+# AdGuardHome Installer
+######################################
 
 export LC_ALL=C
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin:${PATH}"
 
-AI_VERSION="v2.2.3-offline"
+AI_VERSION="v1.0"
 export AI_VERSION
 readonly ADGUARD_METADATA_FILE="/tmp/AGH_STATIC_METADATA_$$.txt"
 readonly ADGUARDHOME_WAIT_TIMEOUT="60"
@@ -317,30 +303,7 @@ init_remote_adguard_metadata() {
 		for v in REMOTE_VER REMOTE_BETA REMOTE_EDGE REMOTE_RELEASE_ARCHIVE REMOTE_BETA_ARCHIVE REMOTE_EDGE_ARCHIVE REMOTE_RELEASE_MD5 REMOTE_BETA_MD5 REMOTE_EDGE_MD5 REMOTE_RELEASE_URL REMOTE_BETA_URL REMOTE_EDGE_URL; do export ${v}; done
 		return 0
 	fi
-	local COUNT CHANNEL_FILE
-	REMOTE_VER=""; REMOTE_BETA=""; REMOTE_EDGE=""; REMOTE_RELEASE_ARCHIVE=""; REMOTE_BETA_ARCHIVE=""; REMOTE_EDGE_ARCHIVE=""
-	REMOTE_RELEASE_MD5=""; REMOTE_BETA_MD5=""; REMOTE_EDGE_MD5=""; REMOTE_RELEASE_URL=""; REMOTE_BETA_URL=""; REMOTE_EDGE_URL=""
-	COUNT=0; CHANNEL_FILE="${URL_ARCH}/checksum.txt"
-	while [ ${COUNT} -lt 3 ]; do
-		rm -f "${ADGUARD_METADATA_FILE}"
-		if http_get_file "${CHANNEL_FILE}" "${ADGUARD_METADATA_FILE}" "" insecure && [ -s "${ADGUARD_METADATA_FILE}" ]; then
-			REMOTE_VER="$(awk '$1!~/^#/&&$2=="stable"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_BETA="$(awk '$1!~/^#/&&$2=="beta"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_EDGE="$(awk '$1!~/^#/&&$2=="edge"{VERSION=$3;sub(/^version=/,"",VERSION);print VERSION;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_RELEASE_ARCHIVE="$(awk '$1!~/^#/&&$2=="stable"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_BETA_ARCHIVE="$(awk '$1!~/^#/&&$2=="beta"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_EDGE_ARCHIVE="$(awk '$1!~/^#/&&$2=="edge"{print$1;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_RELEASE_MD5="$(awk '$1!~/^#/&&$2=="stable"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_BETA_MD5="$(awk '$1!~/^#/&&$2=="beta"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_EDGE_MD5="$(awk '$1!~/^#/&&$2=="edge"{print$4;exit}' "${ADGUARD_METADATA_FILE}")"
-			REMOTE_RELEASE_URL="${URL_ARCH}/${REMOTE_RELEASE_ARCHIVE}"; REMOTE_BETA_URL="${URL_ARCH}/${REMOTE_BETA_ARCHIVE}"; REMOTE_EDGE_URL="${URL_ARCH}/${REMOTE_EDGE_ARCHIVE}"
-			if [ -n "${REMOTE_VER}" ] && [ -n "${REMOTE_BETA}" ] && [ -n "${REMOTE_EDGE}" ] && [ -n "${REMOTE_RELEASE_ARCHIVE}" ]; then
-				for v in REMOTE_VER REMOTE_BETA REMOTE_EDGE REMOTE_RELEASE_ARCHIVE REMOTE_BETA_ARCHIVE REMOTE_EDGE_ARCHIVE REMOTE_RELEASE_MD5 REMOTE_BETA_MD5 REMOTE_EDGE_MD5 REMOTE_RELEASE_URL REMOTE_BETA_URL REMOTE_EDGE_URL; do export ${v}; done
-				cleanup_api_files; return 0
-			fi
-		fi; COUNT=$((COUNT+1))
-	done
-	init_upstream_adguard_metadata "${CHANNEL_FILE}"
+	init_upstream_adguard_metadata
 }
 
 init_upstream_adguard_metadata() {
@@ -822,7 +785,7 @@ menu() {
 		{ [ -d "${TARG_DIR}" ] && [ -f "${AGH_FILE}" ]; } && PTXT "  3) Change Password" "  4) Reconfigure" "  5) AMTM updates" "  b) Backup"
 		[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && PTXT "  r) Restore"
 		PTXT "  q) Quit"
-		read_input_num "Selection" 1 5 b r q;; *) CHOSEN="$1";; esac
+		read_input_num "Selection" 1 2 q;; *) CHOSEN="$1";; esac
 	[ -n "${CHOSEN}" ] && trap 'clear; end_op_message 2' HUP INT QUIT ABRT TERM
 	case "${CHOSEN}" in
 		1|install|update) PTXT "${INFO} Installing AdGuardHome..."; read_yesno "Proceed?" && inst_AdGuardHome "install" || end_op_message 1;;
@@ -881,7 +844,7 @@ NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]
 [ ${OFFLINE_MODE} -eq 1 ] && PTXT "${INFO} OFFLINE MODE - Assets: ${OFFLINE_DIR}"
 [ -n "${NAT_ENV}" ] && [ -z "$2" ] && [ ${OFFLINE_MODE} -eq 0 ] && PTXT "${WARNING} Double-NAT detected."
 
-[ -z "$2" ] && { printf '\e[8;50;125t'; printf '\033[?7l'; clear; sed -n '2,21p' "$0"; printf '\033[?7h'; }
+[ -z "$2" ] && { printf '\e[8;50;125t'; printf '\033[?7l'; clear; sed -n '2,4p' "$0"; printf '\033[?7h'; }
 
 case "${ROUTER_OS}" in Linux) [ -z "$2" ] && PTXT "${INFO} Linux platform."; ROUTER_OS="linux";; *) PTXT "${ERROR} Unsupported OS."; exit 1;; esac
 case "$(/bin/uname -m)" in
