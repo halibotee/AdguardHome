@@ -1,6 +1,6 @@
 #!/bin/sh
 ######################################
-# AdGuardHome Installer
+# AdGuardHome Installer (2026.06.13)
 ######################################
 
 export LC_ALL=C
