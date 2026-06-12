@@ -10,6 +10,7 @@ IPSET_FILE="/opt/etc/AdGuardHome/ipset.conf"
 IPSET_RUNTIME_DIR="${IPSET_RUNTIME_DIR:-/opt/var/run/AdGuardHome-ipset}"
 IPSET_USER_FILE="/opt/etc/AdGuardHome/ipset.user"
 YAML_FILE="/opt/etc/AdGuardHome/AdGuardHome.yaml"
+DNSMASQ_ADD_FILE="/jffs/configs/dnsmasq.conf.add"
 
 NAME="$(basename "$0")[$$]"
 
@@ -372,6 +373,10 @@ dnsmasq_params() {
 	if { ! resolv_conf_uses_rom && resolv_conf_is_tmp_mount; }; then {
 		umount /tmp/resolv.conf 2>/dev/null
 	}; fi
+	case "$(pidof "${PROCS}" 2>/dev/null | wc -w)" in
+		0) return 0 ;;
+		*) : ;;
+	esac
 	RC_SUPPORT="$(nvram get rc_support 2>/dev/null)"
 	LAN_IF="$(nvram get lan_ifname 2>/dev/null)"
 	case "${1:-}" in
@@ -440,6 +445,14 @@ dnsmasq_params() {
 			done
 			;;
 	esac
+	if [ "${CONFIG}" = "/etc/dnsmasq.conf" ]; then
+		local PERSIST="${DNSMASQ_ADD_FILE}"
+		mkdir -p "$(dirname "${PERSIST}")" 2>/dev/null
+		dnsmasq_delete_matching "${PERSIST}" "port=" "dhcp-option=${DHCP_IF},6"
+		printf "%s\n" \
+			"dhcp-option=${DHCP_IF},6,${NET_ADDR}" \
+			"port=553" >>"${PERSIST}"
+	fi
 	if { ! resolv_conf_uses_rom && [ "$(conf_value ADGUARD_LOCAL)" = "YES" ]; }; then {
 		mount -o bind /rom/etc/resolv.conf /tmp/resolv.conf
 	}; fi
@@ -823,7 +836,6 @@ start_monitor() {
 					"")
 						MONITOR_ELAPSED="0"
 						{ adguardhome_run start_adguardhome; }
-						service restart_dnsmasq >/dev/null 2>&1
 						;;
 				esac
 				case "$(pidof "${PROCS}" 2>/dev/null | wc -w)" in

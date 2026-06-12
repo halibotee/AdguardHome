@@ -427,6 +427,7 @@ inst_AdGuardHome() {
 	write_manager_script /jffs/scripts/dnsmasq.postconf dnsmasq
 	write_manager_script /jffs/scripts/firewall-start 'firewall "$1"'
 	[ "$(nvram get rc_support 2>/dev/null)" = "mtlancfg" ] && { del_jffs_script /jffs/scripts/dnsmasq-sdn.postconf 2>/dev/null; write_manager_script /jffs/scripts/dnsmasq-sdn.postconf 'dnsmasq-sdn $2'; }
+	{ mkdir -p /jffs/configs; local LAN_IP; LAN_IP="$(nvram get lan_ipaddr 2>/dev/null)"; [ -n "${LAN_IP}" ] && { dnsmasq_delete_matching /jffs/configs/dnsmasq.conf.add "port=" "dhcp-option=lan,6"; printf "%s\n" "dhcp-option=lan,6,${LAN_IP}" "port=553" >>/jffs/configs/dnsmasq.conf.add; }; }
 	del_between_magic /jffs/scripts/service-event-end '# Asuswrt-Merlin-AdGuardHome-Installer'
 	write_command_script /jffs/scripts/service-event-end 'if printf "%s" "$@" | /bin/grep -qE "^(((start|stop|restart|kill|reload)_?.*AdGuardHome)$)"; then { sh /jffs/addons/AdGuardHome.d/AdGuardHome.sh "$(printf "%s" "$@" | /bin/grep -oE "(start|stop|restart|kill|reload)")" x & }; fi # Asuswrt-Merlin-AdGuardHome-Installer'
 	if [ "${1:-update}" != "update" ]; then
