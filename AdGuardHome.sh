@@ -373,6 +373,8 @@ dnsmasq_params() {
 	if { ! resolv_conf_uses_rom && resolv_conf_is_tmp_mount; }; then {
 		umount /tmp/resolv.conf 2>/dev/null
 	}; fi
+	mkdir -p /jffs/configs/dnsmasq.d 2>/dev/null
+	printf "%s\n" "port=553" >/jffs/configs/dnsmasq.d/aghome.conf
 	case "$(pidof "${PROCS}" 2>/dev/null | wc -w)" in
 		0) return 0 ;;
 		*) : ;;
