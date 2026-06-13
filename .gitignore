@@ -13,3 +13,10 @@
 *.swp
 *.swo
 *~
+
+# AGH runtime config (generated, do not commit)
+AdGuardHome.yaml
+
+# Backup files
+backup_AdGuardHome.tar.gz
+*.log

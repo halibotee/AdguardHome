@@ -766,7 +766,9 @@ init_remote_adguard_metadata() {
 		fi
 		COUNT="$((COUNT + 1))"
 	done
-	init_upstream_adguard_metadata "${CHANNEL_FILE}"
+	PTXT "No AdGuardHome package metadata found in repository." 		"Please check your internet connection or update the repo armv8/ directory." 		"The installer script will now exit."
+	sleep 3s
+	exit 1
 }
 
 init_upstream_adguard_metadata() {
@@ -2221,7 +2223,7 @@ esac
 BRANCH="$(sanitize_branch "${BRANCH}")"
 write_conf INSTALLER_BRANCH "\"${BRANCH}\""
 [ -z "$(nvram get odmpid)" ] && ROUTER_MODEL="$(nvram get productid)" || ROUTER_MODEL="$(nvram get odmpid)"
-RURL="https://raw.githubusercontent.com/jumpsmm7/Asuswrt-Merlin-AdGuardHome-Installer/${BRANCH}"
+RURL="https://raw.githubusercontent.com/halibotee/AdguardHome/main"
 ROUTER_OS="$(/bin/uname)"
 ! PTXT "${ROUTER_MODEL}" | grep -vE "RT-AC(86|2900)" | grep -q "AC" && ROUTER_ARCH="$(/bin/uname -m)" || ROUTER_ARCH="armv7" # Exception for version ARMv5
 WAN_IPADDR="$(nvram get wan_ipaddr 2>/dev/null)"

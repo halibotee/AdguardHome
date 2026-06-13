@@ -14,6 +14,21 @@ ansi_std="$(printf "\033[m")"
 ansi_rev="$(printf "\033[7m")"
 ansi_ul="$(printf "\033[4m")"
 
+# Functions are grouped by purpose; names are sorted alpha-numerically within each group.
+
+# Process helpers
+
+rc_dependencies_available() {
+	local _REQUIRED_COMMAND
+	for _REQUIRED_COMMAND in grep kill killall logger pidof; do
+		if ! which "${_REQUIRED_COMMAND}" >/dev/null 2>&1; then
+			printf '%s\n' "${CALLER}: required service command is unavailable: ${_REQUIRED_COMMAND}" >&2
+			return 1
+		fi
+	done
+	return 0
+}
+
 process_pids() {
 	pidof "$1" 2>/dev/null
 }
@@ -53,11 +68,14 @@ signal_process() {
 	_PROC="$2"
 	_PIDS="$(process_pids "${_PROC}")"
 	if [ -n "${_PIDS}" ]; then
+		# Intentional word splitting: pidof returns a whitespace-delimited PID list.
 		kill -s "${_SIGNAL}" ${_PIDS} 2>/dev/null || killall -q "-${_SIGNAL}" "${_PROC}" 2>/dev/null
 	else
 		killall -q "-${_SIGNAL}" "${_PROC}" 2>/dev/null
 	fi
 }
+
+# Service action helpers
 
 check() {
 	printf "%s" "${ansi_white} Checking ${DESC}... "
@@ -77,19 +95,56 @@ reload() {
 }
 
 start() {
-	local PIDS
+	local DNS_HANDOFF PIDS STOPPED
 	{ [ "${CRITICAL}" != "yes" ] && [ "${CALLER}" = "cron" ]; } && return 7
 	[ "${ENABLED}" != "yes" ] && return 8
 	printf "%s" "${ansi_white} Starting ${DESC}... ${ansi_std}"
+	DNS_HANDOFF=0
 	PIDS="$(process_pids "${PROC}")"
 	if [ -n "${PIDS}" ]; then
 		printf "%s\n" "            ${ansi_yellow} already running. ${ansi_std}"
 		return 0
 	fi
-	if [ "${PROC}" != "AdGuardHome" ] || ! grep -q '^port=553' /etc/dnsmasq.conf; then { ${PRECMD} >/dev/null 2>&1; }; fi
+	if [ "${PROC}" != "AdGuardHome" ] || ! grep -q '^port=553' /etc/dnsmasq.conf; then
+		if [ "${PROC}" = "AdGuardHome" ]; then
+			DNS_HANDOFF=1
+			trap '[ -n "${POSTFAILCMD:-}" ] && ${POSTFAILCMD} >/dev/null 2>&1; exit 255' HUP INT TERM
+		fi
+		if ! ${PRECMD} >/dev/null 2>&1; then
+			printf "%s\n" "            ${ansi_red} failed. ${ansi_std}"
+			logger -st "${CALLER}" "Pre-start hook failed for ${DESC} from ${CALLER}."
+			[ "${DNS_HANDOFF}" -eq 1 ] && trap - HUP INT TERM
+			return 255
+		fi
+	fi
 	{ ${PREARGS} ${PROC} ${ARGS} >/dev/null 2>&1 </dev/null & }
+	#echo ${PREARGS} ${PROC} ${ARGS}
 	process_wait_for_start "${PROC}" 10
-	if [ "${PROC}" != "AdGuardHome" ] || ! grep -q '^port=553' /etc/dnsmasq.conf; then { ${POSTCMD} >/dev/null 2>&1; }; fi
+	if [ "${PROC}" != "AdGuardHome" ] || ! grep -q '^port=553' /etc/dnsmasq.conf; then
+		if ! ${POSTCMD} >/dev/null 2>&1; then
+			STOPPED=0
+			signal_process TERM "${PROC}"
+			if process_wait_for_stop "${PROC}" 10; then
+				STOPPED=1
+			else
+				signal_process INT "${PROC}"
+				if process_wait_for_stop "${PROC}" 5; then
+					STOPPED=1
+				else
+					signal_process KILL "${PROC}"
+					process_wait_for_stop "${PROC}" 3 && STOPPED=1
+				fi
+			fi
+			if [ "${STOPPED}" -eq 1 ] && [ -n "${POSTFAILCMD:-}" ]; then
+				${POSTFAILCMD} >/dev/null 2>&1 || logger -st "${CALLER}" "Post-start failure recovery failed for ${DESC} from ${CALLER}."
+			fi
+			printf "%s\n" "            ${ansi_red} failed. ${ansi_std}"
+			logger -st "${CALLER}" "Post-start hook failed for ${DESC} from ${CALLER}."
+			[ "${DNS_HANDOFF}" -eq 1 ] && trap - HUP INT TERM
+			return 255
+		fi
+	fi
+	[ "${DNS_HANDOFF}" -eq 1 ] && trap - HUP INT TERM
 	PIDS="$(process_pids "${PROC}")"
 	if [ -z "${PIDS}" ]; then
 		printf "%s\n" "            ${ansi_red} failed. ${ansi_std}"
@@ -132,6 +187,7 @@ stop() {
 	fi
 }
 
+rc_dependencies_available || exit 1
 for PROC in ${PROCS}; do
 	DESC="${DESC:-$PROC}"
 	case "${ACTION}" in
@@ -157,3 +213,5 @@ for PROC in ${PROCS}; do
 			;;
 	esac
 done
+
+#logger "Leaving ${0##*/}."
