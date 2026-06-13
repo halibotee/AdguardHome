@@ -162,7 +162,7 @@ init_remote_adguard_metadata() {
 init_upstream_adguard_metadata() {
 	init_adguard_metadata_defaults
 	local rvm="${ADGUARD_METADATA_FILE}.r" bvm="${ADGUARD_METADATA_FILE}.b" evm="${ADGUARD_METADATA_FILE}.e" c=0
-	while [ ${c} -lt 3 ]; do
+	while [ ${c} -lt 2 ]; do
 		rm -f "${rvm}" "${bvm}" "${evm}"
 		if http_get_file "https://static.adguard.com/adguardhome/release/version.txt" "${rvm}" "" insecure && [ -s "${rvm}" ] &&
 		   http_get_file "https://static.adguard.com/adguardhome/beta/version.txt" "${bvm}" "" insecure && [ -s "${bvm}" ] &&
@@ -379,6 +379,14 @@ cleanup_legacy_firewall() {
 	del_jffs_script /jffs/scripts/firewall-start
 }
 
+dnsmasq_delete_matching() {
+	local CONFIG PATTERN SED_SCRIPT
+	CONFIG="$1"; shift; SED_SCRIPT=""
+	for PATTERN in "$@"; do SED_SCRIPT="${SED_SCRIPT}/^${PATTERN}.*$/d;"; done
+	[ -n "${SED_SCRIPT}" ] || return 0
+	sed -i "${SED_SCRIPT}" "${CONFIG}"
+}
+
 inst_AdGuardHome() {
 	local ADGUARD_TAR="AdGuardHome_${ADGUARD_ARCH}.tar.gz"
 	if [ -z "$2" ]; then
@@ -390,8 +398,9 @@ inst_AdGuardHome() {
 			fi
 		fi
 		if ! check_connection; then PTXT "${ERROR}No internet!"; end_op_message 1 "$1"; return; fi
+		check_dns_environment 0
 		create_dir "${TARG_DIR}" || { end_op_message 1 "$1"; return; }
-		download_file "${TARG_DIR}" 755 "${RURL}/installer" || { PTXT "${ERROR}Failed to download installer."; end_op_message 1 "$1"; return; }
+		download_file "${TARG_DIR}" 755 "${RURL}/installer" || { PTXT "${ERROR}Failed to download installer."; rmdir "${TARG_DIR}" 2>/dev/null; end_op_message 1 "$1"; return; }
 		if [ "${1:-RESTORE}" != "RESTORE" ]; then
 			[ "${1:-install}" != "update" ] && choose_branch
 			local ADGUARD_BRANCH="$(conf_value ADGUARD_BRANCH)"
@@ -585,7 +594,7 @@ menu() {
 # ===== INPUT HELPERS =====
 read_input_num() {
 	local RANGE="[${2}-${3}${4:+/$4}${5:+/$5}${6:+/$6}]"
-	PTXT -n "${INPUT}${1}, ${BOLD}${RANGE}${NORM}: "; read -r CHOSEN
+	PTXT -n "${INPUT}${1}, ${BOLD}${RANGE}${NORM}: "; read -r CHOSEN || { PTXT "\n${ERROR}Input closed."; exit 1; }
 	[ -z "${CHOSEN}" ] && { read_input_num "$@"; return; }
 	case "${CHOSEN}" in $4|$5|$6) return 1;; esac
 	PTXT "${CHOSEN}" | grep -qE '^[0-9]+$' || { read_input_num "$@"; return; }
@@ -593,19 +602,19 @@ read_input_num() {
 }
 
 read_input_port() {
-	PTXT -n "${INPUT}${1} ${BOLD}${2}: ${NORM}"; read -r WEB_PORT; [ -z "${WEB_PORT}" ] && WEB_PORT="$2"
+	PTXT -n "${INPUT}${1} ${BOLD}${2}: ${NORM}"; read -r WEB_PORT || { PTXT "\n${ERROR}Input closed."; exit 1; }; [ -z "${WEB_PORT}" ] && WEB_PORT="$2"
 	PTXT "${WEB_PORT}" | grep -qoE '^(3000|[3-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$' && [ ${WEB_PORT} -ge 3000 ] && [ ${WEB_PORT} -le 65535 ] || { PTXT "${ERROR}Invalid port (3000-65535)."; read_input_port "$@"; return; }
 	netstat -nlp 2>/dev/null | grep -qE "(:${WEB_PORT}[[:space:]])" && { PTXT "${ERROR}Port ${WEB_PORT} in use."; read_input_port "$@"; }
 }
 
 read_input_dns() {
-	PTXT -n "${INPUT}${1} ${BOLD}${2}: ${NORM}"; read -r DNS_SERVER; [ -z "${DNS_SERVER}" ] && DNS_SERVER="$2"
+	PTXT -n "${INPUT}${1} ${BOLD}${2}: ${NORM}"; read -r DNS_SERVER || { PTXT "\n${ERROR}Input closed."; exit 1; }; [ -z "${DNS_SERVER}" ] && DNS_SERVER="$2"
 	PTXT "${DNS_SERVER}" | grep -qoE "\b((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b" || { PTXT "${ERROR}Invalid DNS."; read_input_dns "$@"; return; }
 	[ "${DNS_SERVER1}" = "${DNS_SERVER}" ] && { PTXT "${ERROR}Duplicate DNS."; read_input_dns "$@"; return; }
 	case "$1" in Primary) BOOTSTRAP1="${DNS_SERVER}"; DNS_SERVER1="${DNS_SERVER}";; Secondary) BOOTSTRAP2="${DNS_SERVER}";; esac
 }
 
-read_yesno() { PTXT -n "${INPUT}${1} ${BOLD}[y/n]${NORM}: "; local YN; read -r YN; case "${YN}" in y|Y) return 0;; n|N) return 1;; *) PTXT "${ERROR}y/n only."; read_yesno "$@";; esac; }
+read_yesno() { PTXT -n "${INPUT}${1} ${BOLD}[y/n]${NORM}: "; local YN; read -r YN || { PTXT "\n${ERROR}Input closed."; exit 1; }; case "${YN}" in y|Y) return 0;; n|N) return 1;; *) PTXT "${ERROR}y/n only."; read_yesno "$@";; esac; }
 
 on_installer_exit() { cleanup_api_files; [ ! -f "${AGH_FILE}" ] && check_dns_environment 1; }
 
@@ -621,7 +630,7 @@ BRANCH="$(sanitize_branch "${BRANCH}")"; write_conf INSTALLER_BRANCH "\"${BRANCH
 [ -z "$(nvram get odmpid 2>/dev/null)" ] && ROUTER_MODEL="$(nvram get productid 2>/dev/null)" || ROUTER_MODEL="$(nvram get odmpid 2>/dev/null)"
 [ -z "${ROUTER_MODEL}" ] && PTXT "${ERROR}Unsupported router." && sleep 3s && exit 1
 [ "$(nvram get sw_mode 2>/dev/null)" != "1" ] && PTXT "${ERROR}Not in router mode." && sleep 3s && exit 1
-RURL="https://raw.githubusercontent.com/halibotee/AdguardHome/${BRANCH}"
+RURL="${GITHUB_RAW_MIRROR:-https://raw.githubusercontent.com}/halibotee/AdguardHome/${BRANCH}"
 ROUTER_OS="$(/bin/uname)"
 ! PTXT "${ROUTER_MODEL}" | grep -vE "RT-AC(86|2900)" | grep -q "AC" && ROUTER_ARCH="$(/bin/uname -m)" || ROUTER_ARCH="armv7"
 NAT_ENV="$(nvram get wan_ipaddr 2>/dev/null | grep -oE '\b^(((10|127)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3})|(((172\.(1[6-9]|2[0-9]|3[0-1]))|(192\.168))(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){2}))$\b')"
@@ -640,8 +649,8 @@ esac
 [ -z "$2" ] && PTXT "Architecture: ${ROUTER_ARCH}"
 
 init_remote_adguard_metadata
-case "$2" in
-	"") cleanup; check_jffs_enabled; check_dns_environment 0; check_version; menu;;
+	case "$2" in
+	"") cleanup; check_jffs_enabled; check_version; menu;;
 	[1-5]|install|update|uninstall|changepw|reconfigure|amtmupdate|[bB]|backup|[rR]|restore) menu "$2";;
 	*) PTXT "Usage: sh installer {branch} {action}";;
 esac
