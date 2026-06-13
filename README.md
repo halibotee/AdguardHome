@@ -12,5 +12,5 @@ curl -L -s -O https://raw.githubusercontent.com/halibotee/AdguardHome/main/insta
 
 ## 前置条件
 
-- Asuswrt-Merlin 固件，JFFS 已启用
-- Entware 已安装到 `/opt`
+- Asuswrt-Merlin 固件
+- 已安装虚拟内存、USB2JFFS、Entware
