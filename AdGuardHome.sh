@@ -10,7 +10,7 @@ IPSET_FILE="/opt/etc/AdGuardHome/ipset.conf"
 IPSET_RUNTIME_DIR="${IPSET_RUNTIME_DIR:-/opt/var/run/AdGuardHome-ipset}"
 IPSET_USER_FILE="/opt/etc/AdGuardHome/ipset.user"
 YAML_FILE="/opt/etc/AdGuardHome/AdGuardHome.yaml"
-DNSMASQ_ADD_FILE="/jffs/configs/dnsmasq.conf.add"
+DNSMASQ_ADD_FILE="/jffs/configs/dnsmasq.d/aghome.conf"
 
 NAME="$(basename "$0")[$$]"
 
