@@ -507,18 +507,23 @@ setup_AdGuardHome_impl() {
 
 setup_amtmupdate() { local AMTM_UPDATE; local CURRENT_AMTM_UPDATE="$(conf_value AMTM_UPDATE)"; [ -z "${CURRENT_AMTM_UPDATE}" ] || [ "${CURRENT_AMTM_UPDATE}" = "DISABLED" ] && AMTM_UPDATE="ENABLED" || AMTM_UPDATE="DISABLED"; PTXT "Setting AMTM Update to ${AMTM_UPDATE}."; write_conf AMTM_UPDATE "\"${AMTM_UPDATE}\""; end_op_message 0; }
 
-uninst_all() {
-	[ -f "${BASE_DIR}/backup_AdGuardHome.tar.gz" ] && read_yesno "Remove backup?" && rm -f "${BASE_DIR}/backup_AdGuardHome.tar.gz"
-	agh_stop; cleanup_legacy_firewall
-	[ "$(conf_value ADGUARD_DOMAIN)" = "yes" ] && nvram set lan_domain="" && nvram commit
-	mv "${TARG_DIR}/installer" "${HOME}/installer" 2>/dev/null
-	rm -rf "${TARG_DIR}" "/opt/etc/init.d/S99AdGuardHome" "/opt/etc/init.d/rc.func.AdGuardHome" "/opt/sbin/AdGuardHome" "/opt/bin/bcrypt-tool" "${ADDON_DIR}" "/opt/var/log/AdGuardHome.log"
-	yaml_nvars_delete "#Asuswrt-Merlin AdGuardHome Installer" /jffs/scripts/dnsmasq.postconf 2>/dev/null
-	for s in init-start dnsmasq.postconf firewall-start services-stop; do del_jffs_script "/jffs/scripts/${s}" 2>/dev/null; done
-	[ "$(nvram get rc_support 2>/dev/null)" = "mtlancfg" ] && del_jffs_script /jffs/scripts/dnsmasq-sdn.postconf 2>/dev/null
-	del_between_magic /jffs/scripts/service-event-end '# Asuswrt-Merlin-AdGuardHome-Installer'
-	service restart_dnsmasq >/dev/null 2>&1; end_op_message 0
-}
+ uninst_all() {
+ 	agh_stop; cleanup_legacy_firewall
+ 	[ "$(conf_value ADGUARD_DOMAIN)" = "yes" ] && nvram set lan_domain="" && nvram commit
+ 	mv "${TARG_DIR}/installer" "${HOME}/installer" 2>/dev/null
+ 	rm -rf "${TARG_DIR}" "/opt/etc/init.d/S99AdGuardHome" "/opt/etc/init.d/rc.func.AdGuardHome" "/opt/sbin/AdGuardHome" "/opt/bin/bcrypt-tool" "${ADDON_DIR}" "/opt/var/log/AdGuardHome.log" "/opt/etc/backup_AdGuardHome.tar.gz" "/jffs/configs/dnsmasq.conf.add"
+ 	yaml_nvars_delete "#Asuswrt-Merlin AdGuardHome Installer" /jffs/scripts/dnsmasq.postconf 2>/dev/null
+ 	for s in init-start dnsmasq.postconf firewall-start services-stop; do
+ 		del_jffs_script "/jffs/scripts/${s}" 2>/dev/null
+ 		sed -i '/\/jffs\/addons\/AdGuardHome\.d\//d' "/jffs/scripts/${s}" 2>/dev/null
+ 		[ "$(awk 'NR>1{print;exit}' "/jffs/scripts/${s}" 2>/dev/null)" = "" ] && rm -f "/jffs/scripts/${s}" 2>/dev/null
+ 	done
+ 	[ "$(nvram get rc_support 2>/dev/null)" = "mtlancfg" ] && del_jffs_script /jffs/scripts/dnsmasq-sdn.postconf 2>/dev/null
+ 	del_between_magic /jffs/scripts/service-event-end '# Asuswrt-Merlin-AdGuardHome-Installer'
+ 	sed -i '/AdGuardHome/d' /jffs/scripts/service-event-end 2>/dev/null
+ 	[ "$(awk 'NR>1{print;exit}' /jffs/scripts/service-event-end 2>/dev/null)" = "" ] && rm -f /jffs/scripts/service-event-end 2>/dev/null
+ 	service restart_dnsmasq >/dev/null 2>&1; end_op_message 0
+ }
 
 # --- Write helpers ---
 write_command_script() {
